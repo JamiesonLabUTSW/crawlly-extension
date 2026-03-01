@@ -40,9 +40,8 @@ function extractExtension(fileNameOrUrl) {
 
 function normalizeStudyId(raw) {
   if (!raw) return null;
-  const cleaned = raw.toUpperCase().replace(/\s|-/g, "");
-  const match = cleaned.match(/^STU\d{5,}$/);
-  return match ? match[0] : null;
+  const match = String(raw).match(/\bSTU(?:[-\s]?\d){5,}\b/i);
+  return match ? match[0].trim() : null;
 }
 
 function makeRelativeFromAbsolute(absPath, studyId) {
@@ -397,8 +396,9 @@ async function detectStudyContext(tabId) {
 
   const ctx = await runScript(tabId, () => {
     const bodyText = document.body ? document.body.innerText : "";
-    const idFromUrl = (location.href.match(/STU[-\s]?\d{5,}/i) || [])[0] || null;
-    const idFromBody = (bodyText.match(/STU[-\s]?\d{5,}/i) || [])[0] || null;
+    const studyIdPattern = /\bSTU(?:[-\s]?\d){5,}\b/i;
+    const idFromUrl = (location.href.match(studyIdPattern) || [])[0] || null;
+    const idFromBody = (bodyText.match(studyIdPattern) || [])[0] || null;
     const docsLink = Array.from(document.querySelectorAll("a,button")).find((el) =>
       /documents/i.test((el.textContent || "").trim())
     );
