@@ -589,30 +589,73 @@ async function captureSectionSnapshot(tabId, frameId, sectionIndex) {
       }
 
       async function captureViewFromClick(anchor, label, viewIndex) {
+        async function findDialogIframe(maxWaitMs = 6000) {
+          const started = Date.now();
+          while (Date.now() - started < maxWaitMs) {
+            let iframeCandidate =
+              document.querySelector("iframe[name='dialogIframe']") ||
+              document.querySelector("iframe[id*='dialogIframe']") ||
+              document.querySelector("iframe[src*='DataEntry/Form']");
+            let docRef = document;
+
+            if (!iframeCandidate) {
+              try {
+                if (window.parent && window.parent.document) {
+                  iframeCandidate =
+                    window.parent.document.querySelector("iframe[name='dialogIframe']") ||
+                    window.parent.document.querySelector("iframe[id*='dialogIframe']") ||
+                    window.parent.document.querySelector("iframe[src*='DataEntry/Form']");
+                  if (iframeCandidate) docRef = window.parent.document;
+                }
+              } catch (_) {
+                // cross-origin parent access can fail
+              }
+            }
+
+            if (iframeCandidate) {
+              return { iframe: iframeCandidate, parentDoc: docRef };
+            }
+            await sleepInner(150);
+          }
+          return { iframe: null, parentDoc: document };
+        }
+
+        async function extractViewHtmlFromIframe(iframeNode, title, idx, maxWaitMs = 10000) {
+          const started = Date.now();
+          while (Date.now() - started < maxWaitMs) {
+            try {
+              const iframeDoc = iframeNode.contentDocument;
+              const body = iframeDoc?.body;
+              if (!body) {
+                await sleepInner(200);
+                continue;
+              }
+
+              const textLength = (body.innerText || "").replace(/\s+/g, "").length;
+              const elementCount = body.querySelectorAll("*").length;
+              const innerLength = (body.innerHTML || "").trim().length;
+              const hasMeaningfulContent =
+                textLength > 40 || elementCount > 8 || innerLength > 400;
+
+              if (hasMeaningfulContent) {
+                return serializeStandaloneHtml(body, `${title} - View ${idx}`);
+              }
+            } catch (_) {
+              // iframe document may be unavailable while loading
+            }
+            await sleepInner(200);
+          }
+          return "";
+        }
+
         try {
           anchor.scrollIntoView({ block: "center", behavior: "instant" });
           anchor.click();
-          await sleepInner(800);
+          await sleepInner(1200);
 
-          let iframe =
-            document.querySelector("iframe[name='dialogIframe']") ||
-            document.querySelector("iframe[id*='dialogIframe']") ||
-            document.querySelector("iframe[src*='DataEntry/Form']");
-          let parentDoc = document;
-
-          if (!iframe) {
-            try {
-              if (window.parent && window.parent.document) {
-                iframe =
-                  window.parent.document.querySelector("iframe[name='dialogIframe']") ||
-                  window.parent.document.querySelector("iframe[id*='dialogIframe']") ||
-                  window.parent.document.querySelector("iframe[src*='DataEntry/Form']");
-                parentDoc = window.parent.document;
-              }
-            } catch (_) {
-              // cross-origin parent access can fail
-            }
-          }
+          const iframeInfo = await findDialogIframe(6000);
+          const iframe = iframeInfo.iframe;
+          const parentDoc = iframeInfo.parentDoc;
 
           let url = null;
           let html = "";
@@ -621,16 +664,11 @@ async function captureSectionSnapshot(tabId, frameId, sectionIndex) {
           if (iframe) {
             const src = iframe.getAttribute("src") || "";
             url = asAbsolute(src);
-            try {
-              if (iframe.contentDocument && iframe.contentDocument.body) {
-                html = serializeStandaloneHtml(
-                  iframe.contentDocument.body,
-                  `${label} - View ${viewIndex}`
-                );
-                method = "iframe-content";
-              }
-            } catch (_) {
-              // iframe document may be unavailable
+            html = await extractViewHtmlFromIframe(iframe, label, viewIndex, 10000);
+            if (html) {
+              method = "iframe-content";
+            } else {
+              method = "iframe-empty";
             }
           }
 
@@ -638,7 +676,10 @@ async function captureSectionSnapshot(tabId, frameId, sectionIndex) {
             const directUrl = resolveViewUrl(anchor);
             if (directUrl) {
               url = directUrl;
-              method = "url-fallback";
+              method =
+                method === "iframe-empty"
+                  ? "url-fallback-after-empty-iframe"
+                  : "url-fallback";
             }
           }
 
