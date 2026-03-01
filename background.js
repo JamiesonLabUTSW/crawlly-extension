@@ -53,6 +53,63 @@ function makeRelativeFromAbsolute(absPath, studyId) {
   return absPath.replace(/\\/g, "/").slice(idx + marker.length);
 }
 
+function escapeHtml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function extractBodyHtml(html) {
+  const raw = String(html || "");
+  const match = raw.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
+  return match ? match[1] : raw;
+}
+
+function buildStitchedSectionHtml(sectionLabel, parts) {
+  const safeTitle = escapeHtml(sectionLabel || "Section");
+  const normalizedParts = Array.isArray(parts)
+    ? parts
+        .filter((part) => part?.html)
+        .map((part) => ({
+          fileName: String(part.fileName || "part.html"),
+          html: extractBodyHtml(part.html)
+        }))
+    : [];
+  const partBlocks = normalizedParts
+    .map((part, index) => {
+      const safeName = escapeHtml(part.fileName);
+      const pageBreak = index < normalizedParts.length - 1 ? "<div class='page-break'></div>" : "";
+      return [
+        "<section class='part'>",
+        `<h2>${index + 1}. ${safeName}</h2>`,
+        "<div class='part-content'>",
+        part.html,
+        "</div>",
+        "</section>",
+        pageBreak
+      ].join("");
+    })
+    .join("");
+
+  return [
+    "<!doctype html>",
+    "<html>",
+    "<head>",
+    "<meta charset='utf-8' />",
+    `<title>${safeTitle}</title>`,
+    "<style>body{font-family:Segoe UI,Tahoma,sans-serif;color:#111;margin:20px;}h1{font-size:22px;margin:0 0 18px 0;}h2{font-size:16px;margin:0 0 10px 0;padding:8px 10px;background:#f3f6f8;border:1px solid #d4dde3;}.part{margin:0 0 20px 0;}.part-content{border:1px solid #e2e8ed;padding:12px;}.page-break{page-break-after:always;}table{border-collapse:collapse;}td,th{border:1px solid #d2d8dd;padding:4px;vertical-align:top;}a{color:#0b5cab;}</style>",
+    "</head>",
+    "<body>",
+    `<h1>${safeTitle}</h1>`,
+    partBlocks,
+    "</body>",
+    "</html>"
+  ].join("");
+}
+
 function queueExpectedFilename(filename, conflictAction = "uniquify") {
   PENDING_EXTENSION_FILENAMES.push({
     filename,
@@ -97,7 +154,7 @@ function createJob(tabId) {
     documents: [],
     awaitingDoc: null,
     diagnostics: {
-      schemaVersion: "1.0",
+      schemaVersion: "1.1",
       startedAt: nowIso(),
       context: {},
       smartform: {
@@ -634,8 +691,7 @@ async function captureSectionSnapshot(tabId, frameId, sectionIndex) {
               const textLength = (body.innerText || "").replace(/\s+/g, "").length;
               const elementCount = body.querySelectorAll("*").length;
               const innerLength = (body.innerHTML || "").trim().length;
-              const hasMeaningfulContent =
-                textLength > 40 || elementCount > 8 || innerLength > 400;
+              const hasMeaningfulContent = textLength > 40 || elementCount > 8 || innerLength > 400;
 
               if (hasMeaningfulContent) {
                 return serializeStandaloneHtml(body, `${title} - View ${idx}`);
@@ -677,9 +733,7 @@ async function captureSectionSnapshot(tabId, frameId, sectionIndex) {
             if (directUrl) {
               url = directUrl;
               method =
-                method === "iframe-empty"
-                  ? "url-fallback-after-empty-iframe"
-                  : "url-fallback";
+                method === "iframe-empty" ? "url-fallback-after-empty-iframe" : "url-fallback";
             }
           }
 
@@ -1036,8 +1090,8 @@ async function writeSmartFormIndex(job) {
     sections: job.smartformSections.map((s) => ({
       label: s.label,
       dir: s.dir,
-      segmentPath: s.segmentPath,
-      viewPaths: s.viewPaths
+      stitchedPath: s.stitchedPath,
+      partCount: s.partCount
     }))
   };
   return saveTextFile(
@@ -1051,7 +1105,7 @@ async function writeSmartFormIndex(job) {
 
 async function writeManifest(job) {
   const payload = {
-    schemaVersion: "1.0",
+    schemaVersion: "1.1",
     studyId: job.studyId,
     exportedAt: nowIso(),
     extensionVersion: chrome.runtime.getManifest().version,
@@ -1065,8 +1119,8 @@ async function writeManifest(job) {
         sections: job.smartformSections.map((s) => ({
           label: s.label,
           dir: s.dir,
-          segmentPath: s.segmentPath,
-          viewPaths: s.viewPaths
+          stitchedPath: s.stitchedPath,
+          partCount: s.partCount
         }))
       },
       documents: job.documents
@@ -1179,16 +1233,7 @@ async function runExport(tabId) {
         }
 
         const dir = sanitizeFilename(snapshot.label.replace(/\//g, " // "));
-        const segmentRel = await saveTextFile(
-          job.studyId,
-          `smartform/${dir}/segment.html`,
-          snapshot.html,
-          "text/html;charset=utf-8"
-        );
-        const segmentPath = segmentRel.startsWith("smartform/")
-          ? segmentRel.slice("smartform/".length)
-          : `${dir}/segment.html`;
-        const viewPaths = [];
+        const stitchedParts = [{ fileName: "segment.html", html: snapshot.html }];
 
         if (Array.isArray(snapshot.views) && snapshot.views.length) {
           for (let v = 0; v < snapshot.views.length; v++) {
@@ -1208,33 +1253,35 @@ async function runExport(tabId) {
                 warnJob(job, `View capture issue in "${snapshot.label}": ${view.error}`);
               continue;
             }
-            const savedViewRel = await saveTextFile(
-              job.studyId,
-              `smartform/${dir}/view${v + 1}.html`,
-              viewHtml,
-              "text/html;charset=utf-8"
-            );
-            viewPaths.push(
-              savedViewRel.startsWith("smartform/")
-                ? savedViewRel.slice("smartform/".length)
-                : `${dir}/view${v + 1}.html`
-            );
+            stitchedParts.push({ fileName: `view${v + 1}.html`, html: viewHtml });
           }
         }
+
+        const stitchedHtml = buildStitchedSectionHtml(snapshot.label, stitchedParts);
+        const stitchedRel = await saveTextFile(
+          job.studyId,
+          `smartform/${dir}/section_stitched.html`,
+          stitchedHtml,
+          "text/html;charset=utf-8"
+        );
+        const stitchedPath = stitchedRel.startsWith("smartform/")
+          ? stitchedRel.slice("smartform/".length)
+          : `${dir}/section_stitched.html`;
 
         job.smartformSections.push({
           label: snapshot.label,
           dir,
-          segmentPath,
-          viewPaths
+          stitchedPath,
+          partCount: stitchedParts.length
         });
         job.diagnostics.smartform.sectionReports.push({
           sectionNumber: i + 1,
           label: snapshot.label,
           sectionDir: dir,
-          segmentPath,
+          stitchedPath,
+          partCountSaved: stitchedParts.length,
           viewCountDetected: Array.isArray(snapshot.views) ? snapshot.views.length : 0,
-          viewCountSaved: viewPaths.length,
+          viewCountIncluded: Math.max(0, stitchedParts.length - 1),
           selectorStats: snapshot.selectorStats || {}
         });
         logJob(job, `Captured section ${i + 1}/${sections.length}: ${snapshot.label}`);
