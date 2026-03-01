@@ -1,0 +1,35 @@
+name: Release Package
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate manifest and security
+        run: npm run validate:manifest && npm run security:check
+
+      - name: Build package
+        run: npm run pack
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: crawlly-extension-package
+          path: dist/*.zip

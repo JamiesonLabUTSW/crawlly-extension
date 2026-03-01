@@ -1,0 +1,24 @@
+{
+  "name": "ethos-irb-exporter",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ETHOS IRB Exporter browser extension",
+  "scripts": {
+    "lint": "eslint .",
+    "format:check": "prettier --check .",
+    "format:write": "prettier --write .",
+    "validate:manifest": "node ./scripts/validate-manifest.mjs",
+    "security:check": "node ./scripts/security-check.mjs",
+    "pack": "bash ./scripts/pack.sh",
+    "ci": "npm run lint && npm run format:check && npm run validate:manifest && npm run security:check"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.21.0",
+    "eslint": "^9.21.0",
+    "globals": "^15.15.0",
+    "prettier": "^3.5.3"
+  }
+}

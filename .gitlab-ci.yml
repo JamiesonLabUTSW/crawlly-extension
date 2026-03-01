@@ -1,0 +1,33 @@
+stages:
+  - validate
+  - package
+
+default:
+  image: node:20
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}
+    paths:
+      - node_modules/
+
+validate:
+  stage: validate
+  script:
+    - npm ci
+    - npm run ci
+
+package:
+  stage: package
+  script:
+    - npm ci
+    - npm run validate:manifest
+    - npm run security:check
+    - npm run pack
+  artifacts:
+    when: always
+    paths:
+      - dist/*.zip
+    expire_in: 14 days
+  rules:
+    - if: "$CI_COMMIT_TAG"
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+      when: manual

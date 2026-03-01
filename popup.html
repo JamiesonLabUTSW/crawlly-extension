@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ETHOS IRB Exporter</title>
+    <link rel="stylesheet" href="./popup.css" />
+  </head>
+  <body>
+    <main class="app">
+      <h1>ETHOS IRB Exporter</h1>
+      <p id="context" class="muted">Checking tab context...</p>
+      <p class="callout">
+        Run one export at a time and avoid other downloads until this export completes.
+      </p>
+      <div class="actions">
+        <button id="startBtn" disabled>Export Package</button>
+        <button id="cancelBtn" disabled>Cancel</button>
+      </div>
+      <section class="status">
+        <div id="step" class="step">Idle</div>
+        <div id="progress" class="progress"></div>
+      </section>
+      <pre id="logs" class="logs"></pre>
+    </main>
+    <script src="./popup.js"></script>
+  </body>
+</html>

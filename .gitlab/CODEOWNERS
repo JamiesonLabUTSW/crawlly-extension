@@ -1,0 +1,13 @@
+# Default owner (GitLab)
+# Replace @JamiesonLabUTSW/<group-or-user> with your actual GitLab namespace.
+* @JamiesonLabUTSW/hamzameer
+
+# Security-sensitive files
+/manifest.json @JamiesonLabUTSW/hamzameer @JamiesonLabUTSW/security
+/background.js @JamiesonLabUTSW/hamzameer @JamiesonLabUTSW/security
+/scripts/validate-manifest.mjs @JamiesonLabUTSW/hamzameer @JamiesonLabUTSW/security
+/scripts/security-check.mjs @JamiesonLabUTSW/hamzameer @JamiesonLabUTSW/security
+/.github/workflows/* @JamiesonLabUTSW/hamzameer @JamiesonLabUTSW/security
+/.gitlab-ci.yml @JamiesonLabUTSW/hamzameer @JamiesonLabUTSW/security
+/SECURITY.md @JamiesonLabUTSW/hamzameer @JamiesonLabUTSW/security
+/PRIVACY.md @JamiesonLabUTSW/hamzameer @JamiesonLabUTSW/security

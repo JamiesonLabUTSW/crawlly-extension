@@ -1,0 +1,12 @@
+# Default owner (GitHub)
+* @hamzameer
+
+# Security-sensitive files
+/manifest.json @hamzameer @JamiesonLabUTSW/security
+/background.js @hamzameer @JamiesonLabUTSW/security
+/scripts/validate-manifest.mjs @hamzameer @JamiesonLabUTSW/security
+/scripts/security-check.mjs @hamzameer @JamiesonLabUTSW/security
+/.github/workflows/* @hamzameer @JamiesonLabUTSW/security
+/.gitlab-ci.yml @hamzameer @JamiesonLabUTSW/security
+/SECURITY.md @hamzameer @JamiesonLabUTSW/security
+/PRIVACY.md @hamzameer @JamiesonLabUTSW/security
