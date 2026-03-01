@@ -267,7 +267,11 @@ async function waitForCreatedDownload(job, timeoutMs = 30000) {
       const tabMatches =
         item.tabId === job.tabId || item.tabId === -1 || typeof item.tabId !== "number";
       const likelyEthos = isLikelyEthosDownload(item);
-      if (!tabMatches && !likelyEthos) return;
+      const awaitingJobs = Array.from(JOBS.values()).filter(
+        (entry) => entry.status === "running" && entry.awaitingDoc
+      );
+      const onlyThisJobAwaiting = awaitingJobs.length === 1 && awaitingJobs[0]?.id === job.id;
+      if (!tabMatches && !likelyEthos && !onlyThisJobAwaiting) return;
 
       clearTimeout(timer);
       chrome.downloads.onCreated.removeListener(onCreated);
