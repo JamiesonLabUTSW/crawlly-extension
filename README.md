@@ -2,6 +2,33 @@
 
 `ETHOS IRB Exporter` is a Manifest V3 browser extension (Chrome/Edge) that exports a single ETHOS IRB study package from an authenticated study workspace page into:
 
+<p align="center"><img src="screenshot.png" width="400" alt="Extension screenshot"></p>
+
+---
+
+## Table of Contents
+
+- [ETHOS IRB Exporter](#ethos-irb-exporter)
+  - [Table of Contents](#table-of-contents)
+  - [Core capabilities](#core-capabilities)
+  - [Package layout](#package-layout)
+  - [Installation (unpacked)](#installation-unpacked)
+  - [Runtime requirements](#runtime-requirements)
+  - [Operational constraints (current release)](#operational-constraints-current-release)
+  - [Local development](#local-development)
+    - [Prerequisites](#prerequisites)
+    - [Commands](#commands)
+  - [CI/CD (GitHub + GitLab)](#cicd-github--gitlab)
+    - [Validation gates](#validation-gates)
+    - [GitHub](#github)
+    - [GitLab](#gitlab)
+  - [Security model](#security-model)
+  - [Distribution guidance](#distribution-guidance)
+  - [Operational notes](#operational-notes)
+
+---
+
+
 - `~/Downloads/ETHOS/<STUDY_ID>/`
 
 The package is designed for downstream upload/analysis workflows and includes deterministic metadata and diagnostics.
