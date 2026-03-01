@@ -10,7 +10,7 @@ The package is designed for downstream upload/analysis workflows and includes de
 
 - Detects active ETHOS study workspace (`STU...` ID).
 - Captures SmartForm section artifacts:
-  - `smartform/<section>/section_stitched.html` (deterministic stitch of segment + discovered views)
+  - `smartform/<section>/segment.html` (deterministic stitch of section + discovered views)
 - Downloads study documents from the Documents area.
 - Writes package metadata:
   - `smartform/index.json`
@@ -26,7 +26,7 @@ ETHOS/<STUDY_ID>/
   smartform/
     index.json
     <section_dir>/
-      section_stitched.html
+      segment.html
   documents/
     ...downloaded files...
 ```

@@ -74,17 +74,14 @@ function buildStitchedSectionHtml(sectionLabel, parts) {
     ? parts
         .filter((part) => part?.html)
         .map((part) => ({
-          fileName: String(part.fileName || "part.html"),
           html: extractBodyHtml(part.html)
         }))
     : [];
   const partBlocks = normalizedParts
     .map((part, index) => {
-      const safeName = escapeHtml(part.fileName);
       const pageBreak = index < normalizedParts.length - 1 ? "<div class='page-break'></div>" : "";
       return [
         "<section class='part'>",
-        `<h2>${index + 1}. ${safeName}</h2>`,
         "<div class='part-content'>",
         part.html,
         "</div>",
@@ -100,10 +97,9 @@ function buildStitchedSectionHtml(sectionLabel, parts) {
     "<head>",
     "<meta charset='utf-8' />",
     `<title>${safeTitle}</title>`,
-    "<style>body{font-family:Segoe UI,Tahoma,sans-serif;color:#111;margin:20px;}h1{font-size:22px;margin:0 0 18px 0;}h2{font-size:16px;margin:0 0 10px 0;padding:8px 10px;background:#f3f6f8;border:1px solid #d4dde3;}.part{margin:0 0 20px 0;}.part-content{border:1px solid #e2e8ed;padding:12px;}.page-break{page-break-after:always;}table{border-collapse:collapse;}td,th{border:1px solid #d2d8dd;padding:4px;vertical-align:top;}a{color:#0b5cab;}</style>",
+    "<style>body{color:#111;margin:0;background:#fff;}.part{margin:0;}.part-content{margin:0;padding:0;}.page-break{page-break-after:always;}table{border-collapse:collapse;}td,th{border:1px solid #d2d8dd;padding:4px;vertical-align:top;}a{color:#0b5cab;}</style>",
     "</head>",
     "<body>",
-    `<h1>${safeTitle}</h1>`,
     partBlocks,
     "</body>",
     "</html>"
@@ -154,7 +150,7 @@ function createJob(tabId) {
     documents: [],
     awaitingDoc: null,
     diagnostics: {
-      schemaVersion: "1.1",
+      schemaVersion: "1.2",
       startedAt: nowIso(),
       context: {},
       smartform: {
@@ -549,7 +545,7 @@ async function captureSectionSnapshot(tabId, frameId, sectionIndex) {
 
       function serializeStandaloneHtml(rootElement, title) {
         const sourceNodes = [rootElement, ...rootElement.querySelectorAll("*")];
-        const clone = rootElement.cloneNode(true);
+        let clone = rootElement.cloneNode(true);
         const clonedNodes = [clone, ...clone.querySelectorAll("*")];
         const cssProps = [
           "display",
@@ -597,6 +593,43 @@ async function captureSectionSnapshot(tabId, frameId, sectionIndex) {
           )
             continue;
           const style = getComputedStyle(src);
+          const srcTag = String(src.tagName || "").toUpperCase();
+          const hasLayout =
+            typeof src.getClientRects === "function" ? src.getClientRects().length > 0 : true;
+          const nonLayoutAllowed = new Set([
+            "BR",
+            "HR",
+            "TD",
+            "TH",
+            "TR",
+            "TBODY",
+            "THEAD",
+            "TFOOT",
+            "LABEL",
+            "SPAN",
+            "A",
+            "B",
+            "I",
+            "STRONG",
+            "EM"
+          ]);
+          const srcText = (src.textContent || "").trim();
+          const isStyleHidden =
+            style.display === "none" ||
+            style.visibility === "hidden" ||
+            Number(style.opacity || "1") === 0;
+          const isNoLayoutShell =
+            !hasLayout && !nonLayoutAllowed.has(srcTag) && srcText.length === 0;
+          const isDialogChrome = Boolean(
+            src.closest(
+              ".DialogButtonBar, .ui-dialog-titlebar, #navigation, #btnOkReadOnly, #fileProgressDiv, #documentFormHolder, #PortalToolsData"
+            )
+          );
+          if (isStyleHidden || isNoLayoutShell || isDialogChrome) {
+            dst.setAttribute("data-export-remove", "1");
+            continue;
+          }
+
           const inline = cssProps
             .map((prop) => `${prop}:${style.getPropertyValue(prop)};`)
             .join("");
@@ -611,7 +644,59 @@ async function captureSectionSnapshot(tabId, frameId, sectionIndex) {
           }
         }
 
-        clone.querySelectorAll("script").forEach((node) => node.remove());
+        const removeSelectors = [
+          "script",
+          "style",
+          "noscript",
+          "input[type='hidden']",
+          ".Hidden",
+          ".DialogButtonBar",
+          ".ui-dialog-titlebar",
+          "#navigation",
+          "#btnOkReadOnly",
+          "#fileProgressDiv",
+          "#documentFormHolder",
+          "#PortalToolsData"
+        ];
+        clone.querySelectorAll(removeSelectors.join(",")).forEach((node) => node.remove());
+        clone.querySelectorAll("[data-export-remove='1']").forEach((node) => node.remove());
+
+        clone.querySelectorAll("*").forEach((node) => {
+          const style = String(node.getAttribute("style") || "").toLowerCase();
+          if (
+            style.includes("display:none") ||
+            style.includes("visibility:hidden") ||
+            node.getAttribute("aria-hidden") === "true" ||
+            node.hasAttribute("hidden")
+          ) {
+            node.remove();
+            return;
+          }
+          if (style.includes("position:fixed") || style.includes("position:sticky")) {
+            node.remove();
+            return;
+          }
+          const tag = String(node.tagName || "").toUpperCase();
+          if (tag === "BUTTON" || tag === "INPUT") {
+            const type = String(node.getAttribute("type") || "").toLowerCase();
+            const text = (node.textContent || node.getAttribute("value") || "").trim();
+            if (
+              (type === "button" || type === "submit" || tag === "BUTTON") &&
+              /^(ok|close)$/i.test(text)
+            ) {
+              node.remove();
+            }
+          }
+        });
+
+        if (clone.tagName === "BODY") {
+          const bodyContent = document.createElement("div");
+          while (clone.firstChild) {
+            bodyContent.appendChild(clone.firstChild);
+          }
+          clone = bodyContent;
+        }
+
         return [
           "<!doctype html>",
           "<html>",
@@ -690,8 +775,11 @@ async function captureSectionSnapshot(tabId, frameId, sectionIndex) {
 
               const textLength = (body.innerText || "").replace(/\s+/g, "").length;
               const elementCount = body.querySelectorAll("*").length;
-              const innerLength = (body.innerHTML || "").trim().length;
-              const hasMeaningfulContent = textLength > 40 || elementCount > 8 || innerLength > 400;
+              const hasSemanticElements = Boolean(
+                body.querySelector("form, table, .formBody, .EntityViewForm, [id*='EntityView']")
+              );
+              const hasMeaningfulContent =
+                textLength > 80 || (hasSemanticElements && elementCount > 20);
 
               if (hasMeaningfulContent) {
                 return serializeStandaloneHtml(body, `${title} - View ${idx}`);
@@ -849,10 +937,68 @@ async function fetchViewHtml(tabId, frameId, url) {
     tabId,
     async (targetUrl) => {
       try {
+        function pruneDocument(doc) {
+          const removeSelectors = [
+            "script",
+            "style",
+            "noscript",
+            "input[type='hidden']",
+            ".Hidden",
+            ".DialogButtonBar",
+            ".ui-dialog-titlebar",
+            "#navigation",
+            "#btnOkReadOnly",
+            "#fileProgressDiv",
+            "#documentFormHolder",
+            "#PortalToolsData"
+          ];
+          doc.querySelectorAll(removeSelectors.join(",")).forEach((node) => node.remove());
+          doc.querySelectorAll("*").forEach((node) => {
+            const style = String(node.getAttribute("style") || "").toLowerCase();
+            if (
+              style.includes("display:none") ||
+              style.includes("visibility:hidden") ||
+              node.getAttribute("aria-hidden") === "true" ||
+              node.hasAttribute("hidden")
+            ) {
+              node.remove();
+              return;
+            }
+            if (style.includes("position:fixed") || style.includes("position:sticky")) {
+              node.remove();
+              return;
+            }
+            const tag = String(node.tagName || "").toUpperCase();
+            if (tag === "BUTTON" || tag === "INPUT") {
+              const type = String(node.getAttribute("type") || "").toLowerCase();
+              const text = (node.textContent || node.getAttribute("value") || "").trim();
+              if (
+                (type === "button" || type === "submit" || tag === "BUTTON") &&
+                /^(ok|close)$/i.test(text)
+              ) {
+                node.remove();
+              }
+            }
+          });
+        }
+
         const res = await fetch(targetUrl, { credentials: "include" });
         if (!res.ok) return { ok: false, error: `HTTP ${res.status}` };
         const text = await res.text();
-        return { ok: true, html: text };
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(text, "text/html");
+        pruneDocument(doc);
+        const body = doc.body || doc.documentElement;
+        const textLength = (body?.innerText || "").replace(/\s+/g, "").length;
+        const elementCount = body ? body.querySelectorAll("*").length : 0;
+        const hasSemanticElements = Boolean(
+          body?.querySelector("form, table, .formBody, .EntityViewForm, [id*='EntityView']")
+        );
+        const hasMeaningfulContent = textLength > 80 || (hasSemanticElements && elementCount > 20);
+        if (!hasMeaningfulContent) {
+          return { ok: false, error: "Fetched view HTML was empty/shell." };
+        }
+        return { ok: true, html: body.outerHTML || text };
       } catch (err) {
         return { ok: false, error: err?.message || String(err) };
       }
@@ -1090,7 +1236,7 @@ async function writeSmartFormIndex(job) {
     sections: job.smartformSections.map((s) => ({
       label: s.label,
       dir: s.dir,
-      stitchedPath: s.stitchedPath,
+      segmentPath: s.segmentPath,
       partCount: s.partCount
     }))
   };
@@ -1105,7 +1251,7 @@ async function writeSmartFormIndex(job) {
 
 async function writeManifest(job) {
   const payload = {
-    schemaVersion: "1.1",
+    schemaVersion: "1.2",
     studyId: job.studyId,
     exportedAt: nowIso(),
     extensionVersion: chrome.runtime.getManifest().version,
@@ -1119,7 +1265,7 @@ async function writeManifest(job) {
         sections: job.smartformSections.map((s) => ({
           label: s.label,
           dir: s.dir,
-          stitchedPath: s.stitchedPath,
+          segmentPath: s.segmentPath,
           partCount: s.partCount
         }))
       },
@@ -1260,25 +1406,25 @@ async function runExport(tabId) {
         const stitchedHtml = buildStitchedSectionHtml(snapshot.label, stitchedParts);
         const stitchedRel = await saveTextFile(
           job.studyId,
-          `smartform/${dir}/section_stitched.html`,
+          `smartform/${dir}/segment.html`,
           stitchedHtml,
           "text/html;charset=utf-8"
         );
-        const stitchedPath = stitchedRel.startsWith("smartform/")
+        const segmentPath = stitchedRel.startsWith("smartform/")
           ? stitchedRel.slice("smartform/".length)
-          : `${dir}/section_stitched.html`;
+          : `${dir}/segment.html`;
 
         job.smartformSections.push({
           label: snapshot.label,
           dir,
-          stitchedPath,
+          segmentPath,
           partCount: stitchedParts.length
         });
         job.diagnostics.smartform.sectionReports.push({
           sectionNumber: i + 1,
           label: snapshot.label,
           sectionDir: dir,
-          stitchedPath,
+          segmentPath,
           partCountSaved: stitchedParts.length,
           viewCountDetected: Array.isArray(snapshot.views) ? snapshot.views.length : 0,
           viewCountIncluded: Math.max(0, stitchedParts.length - 1),
