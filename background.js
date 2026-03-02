@@ -234,6 +234,44 @@ async function waitForTabComplete(tabId, timeoutMs = 30000) {
   throw new Error("Timed out waiting for tab load.");
 }
 
+function stripHash(url) {
+  return String(url || "").split("#")[0];
+}
+
+async function getWindowTabSnapshot(tabId) {
+  const tab = await chrome.tabs.get(tabId);
+  const tabs = await chrome.tabs.query({ windowId: tab.windowId });
+  return {
+    tabId,
+    windowId: tab.windowId,
+    url: tab.url || "",
+    tabIds: tabs.map((item) => item.id).filter((id) => typeof id === "number")
+  };
+}
+
+async function detectLinkClickOutcome(tabId, beforeSnapshot) {
+  if (!beforeSnapshot) {
+    return {
+      urlChanged: false,
+      openedNewTabIds: [],
+      currentUrl: ""
+    };
+  }
+  const currentTab = await chrome.tabs.get(tabId);
+  const tabs = await chrome.tabs.query({ windowId: beforeSnapshot.windowId });
+  const beforeIds = new Set(beforeSnapshot.tabIds || []);
+  const openedNewTabIds = tabs
+    .map((item) => item.id)
+    .filter((id) => typeof id === "number" && !beforeIds.has(id));
+  const currentUrl = currentTab.url || "";
+  const urlChanged = stripHash(currentUrl) !== stripHash(beforeSnapshot.url);
+  return {
+    urlChanged,
+    openedNewTabIds,
+    currentUrl
+  };
+}
+
 function isLikelyEthosDownload(item) {
   const name = String(item?.filename || "").toLowerCase();
   const urls = [item?.url, item?.finalUrl].map((v) => String(v || "")).filter(Boolean);
@@ -1078,10 +1116,171 @@ async function getDocumentsCount(tabId, frameId = null) {
   );
 }
 
+async function getDocumentRowInfo(tabId, index, frameId = null) {
+  return runScript(
+    tabId,
+    (idx) => {
+      function parseDocInfo(value) {
+        const raw = String(value || "");
+        const head = raw.split("(")[0].trim() || "document";
+        const extMatch = raw.match(/\.([A-Za-z0-9]{2,8})\s*(?:\(|$)/);
+        const extHint = extMatch ? `.${extMatch[1].toLowerCase()}` : "";
+        const cleanName = head.replace(/\.[A-Za-z0-9]{2,8}$/, "").trim() || head;
+        return { cleanName, extHint };
+      }
+
+      const allButtons = Array.from(
+        document.querySelectorAll(
+          "button, a, [role='button'], [role='menuitem'], [aria-label], [title]"
+        )
+      ).filter((n) => {
+        const text = String(n.textContent || "").trim();
+        const aria = String(n.getAttribute("aria-label") || "").trim();
+        const title = String(n.getAttribute("title") || "").trim();
+        return (
+          /document options/i.test(text) ||
+          /document options/i.test(aria) ||
+          /document options/i.test(title)
+        );
+      });
+      const btn = allButtons[idx];
+      if (!btn) return { ok: false, error: `Document Options #${idx + 1} not found.` };
+
+      const row = btn.closest("tr");
+      let docName = "document";
+      let extHint = "";
+      let rowLinkText = "";
+      let rowLinkHref = "";
+
+      if (row) {
+        const links = Array.from(row.querySelectorAll("a")).filter((n) => {
+          const text = (n.textContent || "").trim();
+          const aria = String(n.getAttribute("aria-label") || "").trim();
+          const title = String(n.getAttribute("title") || "").trim();
+          const href = String(n.getAttribute("href") || "").trim();
+          return (
+            !/document options/i.test(text) &&
+            !/document options/i.test(aria) &&
+            !/document options/i.test(title) &&
+            Boolean(text || href)
+          );
+        });
+        const link = links[0] || null;
+        if (link) {
+          rowLinkText = (link.textContent || "").trim();
+          rowLinkHref = String(link.getAttribute("href") || "").trim();
+          const parsed = parseDocInfo(rowLinkText);
+          docName = parsed.cleanName;
+          extHint = parsed.extHint;
+        }
+        if (!docName || docName === "document") {
+          const firstCell = row.querySelector("td");
+          if (firstCell) {
+            const parsed = parseDocInfo(firstCell.textContent || "");
+            docName = parsed.cleanName;
+            if (!extHint) extHint = parsed.extHint;
+          }
+        }
+      }
+
+      return {
+        ok: true,
+        docName,
+        extHint,
+        hasRowLink: Boolean(rowLinkText || rowLinkHref),
+        rowLinkText,
+        rowLinkHref
+      };
+    },
+    [index],
+    frameId
+  );
+}
+
+async function clickDocumentRowLink(tabId, index, preferredName = "", frameId = null) {
+  return runScript(
+    tabId,
+    (idx, preferredNameArg) => {
+      function isVisibleNode(node) {
+        if (!node) return false;
+        if (node.hasAttribute("hidden") || node.getAttribute("aria-hidden") === "true")
+          return false;
+        const style = window.getComputedStyle(node);
+        if (style.display === "none" || style.visibility === "hidden") return false;
+        const rect = node.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      }
+
+      const allButtons = Array.from(
+        document.querySelectorAll(
+          "button, a, [role='button'], [role='menuitem'], [aria-label], [title]"
+        )
+      ).filter((n) => {
+        const text = String(n.textContent || "").trim();
+        const aria = String(n.getAttribute("aria-label") || "").trim();
+        const title = String(n.getAttribute("title") || "").trim();
+        return (
+          /document options/i.test(text) ||
+          /document options/i.test(aria) ||
+          /document options/i.test(title)
+        );
+      });
+      const btn = allButtons[idx];
+      if (!btn) return { ok: false, error: `Document Options #${idx + 1} not found.` };
+      const row = btn.closest("tr");
+      if (!row) return { ok: false, error: "Could not locate row for selected document option." };
+
+      const preferred = String(preferredNameArg || "")
+        .trim()
+        .toLowerCase();
+      const links = Array.from(row.querySelectorAll("a"))
+        .filter((n) => isVisibleNode(n))
+        .map((node) => {
+          const text = (node.textContent || "").trim();
+          const href = String(node.getAttribute("href") || "").trim();
+          let score = 0;
+          if (/document options/i.test(text)) score -= 100;
+          if (preferred && text.toLowerCase().includes(preferred)) score += 4;
+          if (href && !href.startsWith("#") && !href.toLowerCase().startsWith("javascript:"))
+            score += 2;
+          if (text) score += 1;
+          return { node, text, href, score };
+        })
+        .filter((item) => item.score > -100);
+      links.sort((a, b) => b.score - a.score);
+      const pick = links[0] || null;
+      if (!pick) return { ok: false, error: "No visible row document link found to click." };
+
+      pick.node.scrollIntoView({ block: "center", behavior: "instant" });
+      pick.node.click();
+      return { ok: true, clickedLabel: pick.text, clickedHref: pick.href };
+    },
+    [index, preferredName],
+    frameId
+  );
+}
+
 async function openDocumentOptions(tabId, index, frameId = null) {
   return runScript(
     tabId,
     async (idx) => {
+      function isVisibleNode(node) {
+        if (!node) return false;
+        if (node.hasAttribute("hidden") || node.getAttribute("aria-hidden") === "true")
+          return false;
+        const style = window.getComputedStyle(node);
+        if (style.display === "none" || style.visibility === "hidden") return false;
+        const rect = node.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      }
+
+      function collectVisibleDownloadItems() {
+        return Array.from(document.querySelectorAll("[role='menuitem'], a, button"))
+          .filter((n) => isVisibleNode(n))
+          .map((n) => ({ node: n, text: (n.textContent || "").trim() }))
+          .filter((item) => /download/i.test(item.text));
+      }
+
       function parseDocInfo(value) {
         const raw = String(value || "");
         const head = raw.split("(")[0].trim() || "document";
@@ -1130,11 +1329,12 @@ async function openDocumentOptions(tabId, index, frameId = null) {
 
       btn.scrollIntoView({ block: "center", behavior: "instant" });
       btn.click();
-      await new Promise((resolve) => setTimeout(resolve, 300));
-
-      const menuItems = Array.from(document.querySelectorAll("[role='menuitem'], a, button"))
-        .map((n) => ({ node: n, text: (n.textContent || "").trim() }))
-        .filter((item) => /download/i.test(item.text));
+      let menuItems = collectVisibleDownloadItems();
+      const deadline = Date.now() + 2000;
+      while (!menuItems.length && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        menuItems = collectVisibleDownloadItems();
+      }
       const hasCopy = menuItems.some((item) => /download copy/i.test(item.text));
       const hasPlain = menuItems.some((item) => /^download$/i.test(item.text));
       if (!menuItems.length) return { ok: false, error: "No download menu item found.", docName };
@@ -1149,6 +1349,16 @@ async function getDownloadMenuAction(tabId, preferCopy = true, frameId = null) {
   return runScript(
     tabId,
     (preferCopyArg) => {
+      function isVisibleNode(node) {
+        if (!node) return false;
+        if (node.hasAttribute("hidden") || node.getAttribute("aria-hidden") === "true")
+          return false;
+        const style = window.getComputedStyle(node);
+        if (style.display === "none" || style.visibility === "hidden") return false;
+        const rect = node.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      }
+
       function asAbsolute(url) {
         try {
           return new URL(url, location.href).toString();
@@ -1182,6 +1392,7 @@ async function getDownloadMenuAction(tabId, preferCopy = true, frameId = null) {
       }
 
       const candidates = Array.from(document.querySelectorAll("[role='menuitem'], a, button"))
+        .filter((n) => isVisibleNode(n))
         .map((n) => ({ node: n, text: (n.textContent || "").trim() }))
         .filter((item) => /download/i.test(item.text));
       if (!candidates.length) return { ok: false, error: "No download menu item found to click." };
@@ -1189,12 +1400,13 @@ async function getDownloadMenuAction(tabId, preferCopy = true, frameId = null) {
       const copyItems = candidates.filter((item) => /download copy/i.test(item.text));
       const plainItems = candidates.filter((item) => /^download$/i.test(item.text));
       const anyDownloadItems = candidates.filter((item) => /download/i.test(item.text));
+      const pickLast = (list) => (list.length ? list[list.length - 1] : null);
 
       const pick =
-        (preferCopyArg ? copyItems[0] : null) ||
-        plainItems[0] ||
-        copyItems[0] ||
-        anyDownloadItems[0];
+        (preferCopyArg ? pickLast(copyItems) : null) ||
+        pickLast(plainItems) ||
+        pickLast(copyItems) ||
+        pickLast(anyDownloadItems);
 
       if (!pick) return { ok: false, error: "No suitable download item matched." };
       const resolvedUrl = resolveUrlFromNode(pick.node);
@@ -1209,7 +1421,18 @@ async function clickDownloadMenuItem(tabId, preferCopy = true, frameId = null) {
   return runScript(
     tabId,
     (preferCopyArg) => {
+      function isVisibleNode(node) {
+        if (!node) return false;
+        if (node.hasAttribute("hidden") || node.getAttribute("aria-hidden") === "true")
+          return false;
+        const style = window.getComputedStyle(node);
+        if (style.display === "none" || style.visibility === "hidden") return false;
+        const rect = node.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      }
+
       const candidates = Array.from(document.querySelectorAll("[role='menuitem'], a, button"))
+        .filter((n) => isVisibleNode(n))
         .map((n) => ({ node: n, text: (n.textContent || "").trim() }))
         .filter((item) => /download/i.test(item.text));
       if (!candidates.length) return { ok: false, error: "No download menu item found to click." };
@@ -1217,12 +1440,13 @@ async function clickDownloadMenuItem(tabId, preferCopy = true, frameId = null) {
       const copyItems = candidates.filter((item) => /download copy/i.test(item.text));
       const plainItems = candidates.filter((item) => /^download$/i.test(item.text));
       const anyDownloadItems = candidates.filter((item) => /download/i.test(item.text));
+      const pickLast = (list) => (list.length ? list[list.length - 1] : null);
 
       const pick =
-        (preferCopyArg ? copyItems[0] : null) ||
-        plainItems[0] ||
-        copyItems[0] ||
-        anyDownloadItems[0];
+        (preferCopyArg ? pickLast(copyItems) : null) ||
+        pickLast(plainItems) ||
+        pickLast(copyItems) ||
+        pickLast(anyDownloadItems);
 
       if (!pick) return { ok: false, error: "No suitable download item matched." };
       pick.node.click();
@@ -1231,6 +1455,23 @@ async function clickDownloadMenuItem(tabId, preferCopy = true, frameId = null) {
     [preferCopy],
     frameId
   );
+}
+
+async function restoreDocumentsContext(job, tabId) {
+  await chrome.tabs.update(tabId, { url: job.workspaceUrl });
+  await waitForTabComplete(tabId, 40000);
+  await sleep(800);
+  const openDocs = await openDocumentsTab(tabId);
+  if (!openDocs?.ok) throw new Error(openDocs?.error || "Failed to open Documents.");
+  await sleep(1200);
+  const docsFrameId = await findDocumentsFrame(tabId);
+  if (docsFrameId == null) {
+    warnJob(job, "Could not identify a frame containing Document Options; using top frame.");
+  } else {
+    logJob(job, `Using documents frame ${docsFrameId}.`);
+  }
+  job.diagnostics.documents.frameId = docsFrameId;
+  return docsFrameId;
 }
 
 async function writeSmartFormIndex(job) {
@@ -1455,18 +1696,9 @@ async function runExport(tabId) {
 
     if (job.cancelRequested) return cancelAndPersist();
     job.step = "Downloading study documents";
-    const openDocs = await openDocumentsTab(tabId);
-    if (!openDocs?.ok) throw new Error(openDocs?.error || "Failed to open Documents.");
-    await sleep(1200);
-    const docsFrameId = await findDocumentsFrame(tabId);
-    if (docsFrameId == null) {
-      warnJob(job, "Could not identify a frame containing Document Options; using top frame.");
-    } else {
-      logJob(job, `Using documents frame ${docsFrameId}.`);
-    }
+    let docsFrameId = await restoreDocumentsContext(job, tabId);
     const docsInfo = await getDocumentsCount(tabId, docsFrameId);
     job.documentTotal = docsInfo?.count || 0;
-    job.diagnostics.documents.frameId = docsFrameId;
     job.diagnostics.documents.optionRowsDetected = job.documentTotal;
     logJob(job, `Found ${job.documentTotal} document option rows.`);
     if (job.documentTotal === 0) {
@@ -1476,13 +1708,14 @@ async function runExport(tabId) {
       );
     }
 
+    const tryRowLinkFirst = false;
     for (let i = 0; i < job.documentTotal; i++) {
       if (job.cancelRequested) return cancelAndPersist();
       job.documentIndex = i + 1;
       try {
-        const prep = await openDocumentOptions(tabId, i, docsFrameId);
+        const prep = await getDocumentRowInfo(tabId, i, docsFrameId);
         if (!prep?.ok) {
-          const err = prep?.error || `Failed to prepare download for doc #${i + 1}`;
+          const err = prep?.error || `Failed to inspect document row #${i + 1}`;
           job.errors.push(err);
           job.diagnostics.errors.push(err);
           warnJob(job, err);
@@ -1492,44 +1725,85 @@ async function runExport(tabId) {
         const safeBase = sanitizeFilename(prep.docName || `document_${i + 1}`);
         const extHint = sanitizeExtension(prep.extHint || "");
         job.awaitingDoc = { displayName: prep.docName || `Document ${i + 1}`, safeBase, extHint };
-        const action = await getDownloadMenuAction(tabId, true, docsFrameId);
-        if (!action?.ok) {
-          const err = action?.error || `Failed to resolve download action for doc #${i + 1}`;
-          job.errors.push(err);
-          job.diagnostics.errors.push(err);
-          warnJob(job, err);
-          job.awaitingDoc = null;
-          continue;
-        }
-
         let completeItem = null;
-        let usedDirect = false;
-        if (action.resolvedUrl) {
-          try {
-            const expectedDocFilename = `ETHOS/${job.studyId}/documents/${safeBase}${extHint || ""}`;
-            queueExpectedFilename(expectedDocFilename, "uniquify");
-            const directId = await chrome.downloads.download({
-              url: action.resolvedUrl,
-              filename: expectedDocFilename,
-              saveAs: false,
-              conflictAction: "uniquify"
-            });
-            completeItem = await waitForDownloadComplete(directId, 120000);
-            usedDirect = true;
-          } catch (directErr) {
+        let primaryMethod = "";
+        let fallbackUsed = false;
+        let fallbackReason = "";
+        let clickedRowLinkLabel = "";
+        let clickedMenuLabel = "";
+        let menuPrep = null;
+        let menuAction = null;
+        let linkOutcome = null;
+
+        if (tryRowLinkFirst) {
+          const linkSnapshot = await getWindowTabSnapshot(tabId);
+          const linkClick = await clickDocumentRowLink(tabId, i, prep.docName, docsFrameId);
+          if (!linkClick?.ok) {
+            fallbackUsed = true;
+            fallbackReason = "no_row_link";
             warnJob(
               job,
-              `Direct URL download failed for "${prep.docName}", falling back to click mode: ${directErr?.message || String(directErr)}`
+              `Row-link click unavailable for "${prep.docName}" (${linkClick?.error || "no row link"}); using menu fallback.`
             );
+          } else {
+            clickedRowLinkLabel = linkClick.clickedLabel || "";
+            try {
+              const createdFromLink = await waitForCreatedDownload(job, 15000);
+              completeItem = await waitForDownloadComplete(createdFromLink.id, 120000);
+              primaryMethod = "row_link";
+            } catch (_) {
+              fallbackUsed = true;
+              linkOutcome = await detectLinkClickOutcome(tabId, linkSnapshot);
+              if ((linkOutcome?.openedNewTabIds || []).length > 0) {
+                fallbackReason = "opened_new_tab";
+              } else if (linkOutcome?.urlChanged) {
+                fallbackReason = "opened_preview";
+              } else {
+                fallbackReason = "no_created_event";
+              }
+              warnJob(
+                job,
+                `Row-link download did not start for "${prep.docName}" (${fallbackReason}); using menu fallback.`
+              );
+              if ((linkOutcome?.openedNewTabIds || []).length > 0) {
+                try {
+                  await chrome.tabs.remove(linkOutcome.openedNewTabIds);
+                } catch (closeErr) {
+                  warnJob(
+                    job,
+                    `Could not close row-link opened tab(s): ${closeErr?.message || String(closeErr)}`
+                  );
+                }
+              }
+              if (linkOutcome?.urlChanged || (linkOutcome?.openedNewTabIds || []).length > 0) {
+                docsFrameId = await restoreDocumentsContext(job, tabId);
+              }
+            }
           }
-        } else {
-          warnJob(job, `Could not resolve direct URL for "${prep.docName}", using click fallback.`);
         }
 
-        let clickResult = { ok: true, clickedLabel: action.clickedLabel || "" };
         if (!completeItem) {
+          menuPrep = await openDocumentOptions(tabId, i, docsFrameId);
+          if (!menuPrep?.ok) {
+            const err = menuPrep?.error || `Failed to prepare menu fallback for doc #${i + 1}`;
+            job.errors.push(err);
+            job.diagnostics.errors.push(err);
+            warnJob(job, err);
+            job.awaitingDoc = null;
+            continue;
+          }
+          menuAction = await getDownloadMenuAction(tabId, true, docsFrameId);
+          if (!menuAction?.ok) {
+            const err =
+              menuAction?.error || `Failed to resolve fallback download action for doc #${i + 1}`;
+            job.errors.push(err);
+            job.diagnostics.errors.push(err);
+            warnJob(job, err);
+            job.awaitingDoc = null;
+            continue;
+          }
           const downloadCreatedPromise = waitForCreatedDownload(job, 40000);
-          clickResult = await clickDownloadMenuItem(tabId, true, docsFrameId);
+          const clickResult = await clickDownloadMenuItem(tabId, true, docsFrameId);
           if (!clickResult?.ok) {
             const err = clickResult?.error || `Failed to click download for doc #${i + 1}`;
             job.errors.push(err);
@@ -1538,8 +1812,10 @@ async function runExport(tabId) {
             job.awaitingDoc = null;
             continue;
           }
+          clickedMenuLabel = clickResult?.clickedLabel || menuAction?.clickedLabel || "";
           const created = await downloadCreatedPromise;
           completeItem = await waitForDownloadComplete(created.id, 120000);
+          primaryMethod = "menu_click";
         }
 
         if (!completeItem) {
@@ -1573,26 +1849,46 @@ async function runExport(tabId) {
           index: i + 1,
           displayName: prep.docName || `Document ${i + 1}`,
           extHint,
-          menuHadDownloadCopy: Boolean(prep.hasCopy),
-          menuHadPlainDownload: Boolean(prep.hasPlain),
-          clickedMenuLabel: clickResult?.clickedLabel || "",
-          usedDirectUrl: usedDirect,
-          resolvedUrlHost: action.resolvedUrl
+          primaryMethod,
+          fallbackUsed,
+          fallbackReason,
+          clickedRowLinkLabel,
+          clickedMenuLabel,
+          menuHadDownloadCopy: Boolean(menuPrep?.hasCopy),
+          menuHadPlainDownload: Boolean(menuPrep?.hasPlain),
+          resolvedMenuUrlHost: menuAction?.resolvedUrl
             ? (() => {
                 try {
-                  return new URL(action.resolvedUrl).host;
+                  return new URL(menuAction.resolvedUrl).host;
                 } catch (_) {
                   return "";
                 }
               })()
             : "",
           savedPath,
+          downloadId: completeItem.id || null,
+          createdTabId: typeof completeItem.tabId === "number" ? completeItem.tabId : null,
+          finalUrlHost: (() => {
+            try {
+              return new URL(completeItem.finalUrl || completeItem.url || "").host;
+            } catch (_) {
+              return "";
+            }
+          })(),
+          linkOutcome: {
+            urlChanged: Boolean(linkOutcome?.urlChanged),
+            openedNewTabIds: linkOutcome?.openedNewTabIds || [],
+            currentUrl: linkOutcome?.currentUrl || ""
+          },
           finalFilename: completeItem.filename,
           mime,
           lookedLikeHtml
         });
         job.awaitingDoc = null;
-        logJob(job, `Downloaded ${job.documentIndex}/${job.documentTotal}: ${prep.docName}`);
+        logJob(
+          job,
+          `Downloaded ${job.documentIndex}/${job.documentTotal}: ${prep.docName} (${primaryMethod})`
+        );
         await sleep(200);
       } catch (err) {
         const message = err?.message || String(err);
