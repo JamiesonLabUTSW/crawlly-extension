@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <!-- Background gradient: deep navy to blue -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#1a2e4a;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#1e4d8c;stop-opacity:1" />
+    </linearGradient>
+    <!-- Arrow gradient: teal accent -->
+    <linearGradient id="arrowGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#00c9a7;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#0098d4;stop-opacity:1" />
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000000" flood-opacity="0.25"/>
+    </filter>
+  </defs>
+
+  <!-- Rounded square background -->
+  <rect width="128" height="128" rx="22" ry="22" fill="url(#bgGrad)"/>
+
+  <!-- Document body -->
+  <rect x="22" y="18" width="62" height="80" rx="6" ry="6" fill="#ffffff" opacity="0.95" filter="url(#shadow)"/>
+
+  <!-- Document fold corner -->
+  <polygon points="68,18 84,34 68,34" fill="#c8d8ee"/>
+  <polygon points="68,18 84,18 84,34" fill="#e8f0fb"/>
+
+  <!-- Document lines (text rows) -->
+  <rect x="30" y="44" width="38" height="4" rx="2" fill="#b0c4de" opacity="0.8"/>
+  <rect x="30" y="54" width="44" height="4" rx="2" fill="#b0c4de" opacity="0.8"/>
+  <rect x="30" y="64" width="30" height="4" rx="2" fill="#b0c4de" opacity="0.8"/>
+  <rect x="30" y="74" width="40" height="4" rx="2" fill="#b0c4de" opacity="0.6"/>
+
+  <!-- Export arrow circle (bottom right) -->
+  <circle cx="90" cy="90" r="26" fill="url(#arrowGrad)" filter="url(#shadow)"/>
+
+  <!-- Arrow: pointing down-right (export) -->
+  <!-- Arrow shaft -->
+  <line x1="82" y1="82" x2="97" y2="97" stroke="#ffffff" stroke-width="5" stroke-linecap="round"/>
+  <!-- Arrow head -->
+  <polyline points="87,97 97,97 97,87" stroke="#ffffff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+
+  <!-- Small "E" lettermark on document -->
+  <text x="32" y="38" font-family="Georgia, serif" font-size="13" font-weight="bold" fill="#1e4d8c" opacity="0.9">IRB</text>
+</svg>
