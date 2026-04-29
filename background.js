@@ -730,6 +730,33 @@ async function capturePrintedSmartForm(tabId) {
         "#PortalToolsData"
       ];
       clone.querySelectorAll(removeSelectors.join(",")).forEach((node) => node.remove());
+      clone.querySelectorAll("table").forEach((table) => {
+        const headerText = normalizeText(
+          Array.from(table.querySelectorAll("th, .DisplayHead, .ViewSetTableHeader"))
+            .map((cell) => cell.textContent || "")
+            .join(" ")
+        );
+        if (
+          /\b(accountdisabled|cachedpermissionlists|encryptedpassword|passwordsalt|passwordmustchange|projectworkingset)\b/i.test(
+            headerText
+          )
+        ) {
+          table.remove();
+        }
+      });
+      clone.querySelectorAll("*").forEach((node) => {
+        const style = String(node.getAttribute("style") || "")
+          .toLowerCase()
+          .replace(/\s+/g, "");
+        if (
+          style.includes("display:none") ||
+          style.includes("visibility:hidden") ||
+          node.getAttribute("aria-hidden") === "true" ||
+          node.hasAttribute("hidden")
+        ) {
+          node.remove();
+        }
+      });
       clone.querySelectorAll("a").forEach((anchor) => {
         anchor.setAttribute("href", anchor.href || "#");
         anchor.setAttribute("target", "_blank");
@@ -996,6 +1023,7 @@ async function captureSectionSnapshot(tabId, frameId, sectionIndex) {
           "style",
           "noscript",
           "input[type='hidden']",
+          ".ALDForPrint",
           ".Hidden",
           ".DialogButtonBar",
           ".ui-dialog-titlebar",
@@ -1014,6 +1042,20 @@ async function captureSectionSnapshot(tabId, frameId, sectionIndex) {
         ];
         clone.querySelectorAll(removeSelectors.join(",")).forEach((node) => node.remove());
         clone.querySelectorAll("[data-export-remove='1']").forEach((node) => node.remove());
+        clone.querySelectorAll("table").forEach((table) => {
+          const headerText = normalizeText(
+            Array.from(table.querySelectorAll("th, .DisplayHead, .ViewSetTableHeader"))
+              .map((cell) => cell.textContent || "")
+              .join(" ")
+          );
+          if (
+            /\b(accountdisabled|cachedpermissionlists|encryptedpassword|passwordsalt|passwordmustchange|projectworkingset)\b/i.test(
+              headerText
+            )
+          ) {
+            table.remove();
+          }
+        });
 
         clone.querySelectorAll("*").forEach((node) => {
           const style = String(node.getAttribute("style") || "").toLowerCase();
@@ -1390,6 +1432,7 @@ async function fetchViewHtml(tabId, frameId, url) {
             "style",
             "noscript",
             "input[type='hidden']",
+            ".ALDForPrint",
             ".Hidden",
             ".DialogButtonBar",
             ".ui-dialog-titlebar",
@@ -1407,6 +1450,23 @@ async function fetchViewHtml(tabId, frameId, url) {
             "[role='button'][data-projectid][data-projecttype]"
           ];
           doc.querySelectorAll(removeSelectors.join(",")).forEach((node) => node.remove());
+          doc.querySelectorAll("table").forEach((table) => {
+            const headerText = String(
+              Array.from(table.querySelectorAll("th, .DisplayHead, .ViewSetTableHeader"))
+                .map((cell) => cell.textContent || "")
+                .join(" ")
+            )
+              .replace(/\u00a0/g, " ")
+              .replace(/\s+/g, " ")
+              .trim();
+            if (
+              /\b(accountdisabled|cachedpermissionlists|encryptedpassword|passwordsalt|passwordmustchange|projectworkingset)\b/i.test(
+                headerText
+              )
+            ) {
+              table.remove();
+            }
+          });
           doc.querySelectorAll("*").forEach((node) => {
             const style = String(node.getAttribute("style") || "").toLowerCase();
             if (
