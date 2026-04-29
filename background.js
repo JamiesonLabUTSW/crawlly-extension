@@ -723,6 +723,7 @@ async function capturePrintedSmartForm(tabId) {
         "style",
         "noscript",
         "input[type='hidden']",
+        ".ALDForPrint",
         ".Hidden",
         "#fileProgressDiv",
         "#documentFormHolder",
