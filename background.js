@@ -603,7 +603,9 @@ async function waitForPrintedSmartFormReady(tabId, timeoutMs = 60000) {
           .replace(/\u00a0/g, " ")
           .replace(/\s+/g, " ")
           .trim();
-      const sectionBlocks = Array.from(document.querySelectorAll("div#_webr_EntityView"));
+      const sectionBlocks = Array.from(document.querySelectorAll("div#_webr_EntityView")).filter(
+        (node) => !node.parentElement?.closest("div#_webr_EntityView")
+      );
       const headings = sectionBlocks
         .map((node) => {
           const headingNodes = Array.from(
@@ -612,7 +614,7 @@ async function waitForPrintedSmartFormReady(tabId, timeoutMs = 60000) {
           return (
             headingNodes
               .map((heading) => normalizeText(heading.textContent || ""))
-              .find((heading) => /^\d+(?:\.\d+)*/.test(heading)) || ""
+              .find((heading) => /^\d+\.\d+(?!\.)\b/.test(heading)) || ""
           );
         })
         .filter(Boolean);
@@ -700,7 +702,7 @@ async function capturePrintedSmartForm(tabId) {
     }
 
     function sectionPrefix(value) {
-      const match = String(value || "").match(/^\s*(\d+(?:\.\d+)*)\b/);
+      const match = String(value || "").match(/^\s*(\d+\.\d+)(?!\.)\b/);
       return match ? match[1] : "";
     }
 
@@ -709,7 +711,7 @@ async function capturePrintedSmartForm(tabId) {
         root.querySelectorAll("h1, h2, h3, [role='heading'], strong, b, legend")
       );
       const heading =
-        headingNodes.find((node) => /^\s*\d+(?:\.\d+)*/.test(node.textContent || "")) ||
+        headingNodes.find((node) => /^\s*\d+\.\d+(?!\.)\b/.test(node.textContent || "")) ||
         headingNodes[0];
       return normalizeText(heading?.textContent || "");
     }
@@ -781,6 +783,7 @@ async function capturePrintedSmartForm(tabId) {
 
     const sectionBlocks = Array.from(document.querySelectorAll("div#_webr_EntityView")).filter(
       (node) => {
+        if (node.parentElement?.closest("div#_webr_EntityView")) return false;
         const heading = headingText(node);
         const prefix = sectionPrefix(heading);
         const text = normalizeText(node.textContent || "");
