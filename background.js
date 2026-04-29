@@ -149,7 +149,8 @@ function createJob(tabId) {
     documents: [],
     awaitingDoc: null,
     diagnostics: {
-      schemaVersion: "1.2",
+      schemaVersion: "1.3",
+      captureEngine: "smartform-heading-guard-v1",
       startedAt: nowIso(),
       context: {},
       smartform: {
