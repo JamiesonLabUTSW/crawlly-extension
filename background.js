@@ -664,7 +664,7 @@ async function captureSectionSnapshot(tabId, frameId, sectionIndex) {
             !hasLayout && !nonLayoutAllowed.has(srcTag) && srcText.length === 0;
           const isDialogChrome = Boolean(
             src.closest(
-              ".DialogButtonBar, .ui-dialog-titlebar, #navigation, #btnOkReadOnly, #fileProgressDiv, #documentFormHolder, #PortalToolsData"
+              ".DialogButtonBar, .ui-dialog-titlebar, #navigation, #btnOkReadOnly, #fileProgressDiv, #documentFormHolder, #PortalToolsData, .BtnRNPageComments, .BtnRNFieldComments, [class*='ReviewerNotes'], [class*='BtnRN']"
             )
           );
           if (isStyleHidden || isNoLayoutShell || isDialogChrome) {
@@ -684,6 +684,28 @@ async function captureSectionSnapshot(tabId, frameId, sectionIndex) {
           if (dst.tagName === "IMG" && src.currentSrc) {
             dst.setAttribute("src", src.currentSrc);
           }
+          if (dst.tagName === "TEXTAREA") {
+            dst.textContent = src.value || src.textContent || "";
+          }
+          if (dst.tagName === "INPUT") {
+            const type = String(src.getAttribute("type") || "").toLowerCase();
+            if (type === "checkbox" || type === "radio") {
+              if (src.checked) dst.setAttribute("checked", "checked");
+              else dst.removeAttribute("checked");
+            } else if (src.value) {
+              dst.setAttribute("value", src.value);
+            }
+          }
+          if (dst.tagName === "SELECT") {
+            const sourceOptions = Array.from(src.options || []);
+            Array.from(dst.options || []).forEach((option) => option.removeAttribute("selected"));
+            Array.from(src.selectedOptions || []).forEach((option) => {
+              const index = sourceOptions.indexOf(option);
+              if (index >= 0 && dst.options[index]) {
+                dst.options[index].setAttribute("selected", "selected");
+              }
+            });
+          }
         }
 
         const removeSelectors = [
@@ -698,7 +720,14 @@ async function captureSectionSnapshot(tabId, frameId, sectionIndex) {
           "#btnOkReadOnly",
           "#fileProgressDiv",
           "#documentFormHolder",
-          "#PortalToolsData"
+          "#PortalToolsData",
+          ".BtnRNPageComments",
+          ".BtnRNFieldComments",
+          "[class*='ReviewerNotes']",
+          "[class*='BtnRN']",
+          "[title^='Open reviewer notes']",
+          "[aria-label^='Open reviewer notes']",
+          "[role='button'][data-projectid][data-projecttype]"
         ];
         clone.querySelectorAll(removeSelectors.join(",")).forEach((node) => node.remove());
         clone.querySelectorAll("[data-export-remove='1']").forEach((node) => node.remove());
@@ -719,12 +748,22 @@ async function captureSectionSnapshot(tabId, frameId, sectionIndex) {
             return;
           }
           const tag = String(node.tagName || "").toUpperCase();
+          const text = (node.textContent || node.getAttribute("value") || "").trim();
+          const title = String(node.getAttribute("title") || "");
+          const aria = String(node.getAttribute("aria-label") || "");
+          const className = String(node.getAttribute("class") || "");
+          if (
+            /reviewer\s*notes/i.test(`${text} ${title} ${aria}`) ||
+            /\bBtnRN|ReviewerNotes|Icon-ReviewerNotes/i.test(className)
+          ) {
+            node.remove();
+            return;
+          }
           if (tag === "BUTTON" || tag === "INPUT") {
             const type = String(node.getAttribute("type") || "").toLowerCase();
-            const text = (node.textContent || node.getAttribute("value") || "").trim();
             if (
               (type === "button" || type === "submit" || tag === "BUTTON") &&
-              /^(ok|close)$/i.test(text)
+              /^(ok|close|print|help|finish|save|submit|continue|back|exit)$/i.test(text)
             ) {
               node.remove();
             }
@@ -752,6 +791,104 @@ async function captureSectionSnapshot(tabId, frameId, sectionIndex) {
           "</body>",
           "</html>"
         ].join("");
+      }
+
+      function normalizeText(value) {
+        return String(value || "")
+          .replace(/\u00a0/g, " ")
+          .replace(/\s+/g, " ")
+          .trim()
+          .toLowerCase();
+      }
+
+      function sectionPrefix(value) {
+        const match = String(value || "").match(/^\s*(\d+(?:\.\d+)*)\b/);
+        return match ? match[1] : "";
+      }
+
+      function headingText(root) {
+        if (!root) return "";
+        const heading =
+          root.querySelector("h1, h2, h3, [role='heading']") ||
+          Array.from(root.querySelectorAll("strong, b, legend")).find((node) =>
+            /^\s*\d+(?:\.\d+)*/.test(node.textContent || "")
+          );
+        return (heading?.textContent || "").trim();
+      }
+
+      function sectionMatchesLabel(root, label) {
+        const expectedPrefix = sectionPrefix(label);
+        const heading = headingText(root);
+        if (expectedPrefix && sectionPrefix(heading) === expectedPrefix) return true;
+        const normalizedLabel = normalizeText(label);
+        const normalizedHeading = normalizeText(heading);
+        if (normalizedLabel && normalizedHeading.includes(normalizedLabel)) return true;
+        if (expectedPrefix) {
+          const rootText = normalizeText(root?.textContent || "").slice(0, 500);
+          return rootText.includes(`${expectedPrefix} `);
+        }
+        return Boolean(normalizedHeading || normalizeText(root?.textContent || ""));
+      }
+
+      function resolveSectionContainer(link, label) {
+        const candidates = [];
+        const addCandidate = (node) => {
+          if (node && !candidates.includes(node)) candidates.push(node);
+        };
+
+        const viewId = link.getAttribute("data-viewid");
+        if (viewId) addCandidate(document.getElementById(viewId));
+
+        const ariaControls = link.getAttribute("aria-controls");
+        if (ariaControls) addCandidate(document.getElementById(ariaControls));
+
+        const href = link.getAttribute("href") || "";
+        if (href.includes("#")) {
+          const targetId = href.split("#").pop();
+          if (targetId) addCandidate(document.getElementById(targetId));
+        }
+
+        const contentSelectors = [
+          "._webr_EntityViewWrapper",
+          "#_webr_EntityView",
+          ".SmartFormViewAreaContainer",
+          ".SmartFormViewArea",
+          "[role='main']",
+          "main",
+          "form"
+        ];
+        for (const selector of contentSelectors) {
+          document.querySelectorAll(selector).forEach((node) => addCandidate(node));
+        }
+
+        const visibleCandidates = candidates.filter((node) => {
+          if (!node || node.hasAttribute("hidden") || node.getAttribute("aria-hidden") === "true")
+            return false;
+          const style = window.getComputedStyle(node);
+          if (style.display === "none" || style.visibility === "hidden") return false;
+          const text = (node.textContent || "").trim();
+          return text.length > 40;
+        });
+
+        return (
+          visibleCandidates.find((node) => sectionMatchesLabel(node, label)) ||
+          visibleCandidates.sort((a, b) => b.textContent.length - a.textContent.length)[0] ||
+          null
+        );
+      }
+
+      async function waitForSectionContainer(link, label, maxWaitMs = 10000) {
+        const started = Date.now();
+        let lastContainer = null;
+        while (Date.now() - started < maxWaitMs) {
+          const container = resolveSectionContainer(link, label);
+          if (container) {
+            lastContainer = container;
+            if (sectionMatchesLabel(container, label)) return { container, matched: true };
+          }
+          await sleepInner(200);
+        }
+        return { container: lastContainer, matched: false };
       }
 
       async function closeDialogIfPresent() {
@@ -912,34 +1049,16 @@ async function captureSectionSnapshot(tabId, frameId, sectionIndex) {
       ).trim();
       link.scrollIntoView({ block: "center", behavior: "instant" });
       link.click();
-      await sleepInner(800);
+      await sleepInner(250);
 
-      let container = null;
-      const viewId = link.getAttribute("data-viewid");
-      if (viewId) {
-        container = document.getElementById(viewId);
+      const ready = await waitForSectionContainer(link, label);
+      let container = ready.container;
+      if (!container || !ready.matched) {
+        return {
+          ok: false,
+          error: `Timed out waiting for section "${label}" to become active. Current heading: "${headingText(container)}".`
+        };
       }
-      if (!container) {
-        const href = link.getAttribute("href") || "";
-        if (href.includes("#")) {
-          const targetId = href.split("#").pop();
-          if (targetId) container = document.getElementById(targetId);
-        }
-      }
-      if (!container) {
-        const area = document.querySelector(".SmartFormViewArea");
-        if (area) {
-          const candidates = Array.from(area.querySelectorAll("div, section, article")).filter(
-            (el) => {
-              const text = (el.textContent || "").trim();
-              return text.length > 80 && el.offsetParent !== null;
-            }
-          );
-          container =
-            candidates.sort((a, b) => b.textContent.length - a.textContent.length)[0] || area;
-        }
-      }
-      if (!container) container = document.body;
 
       const viewLinks = Array.from(container.querySelectorAll("a")).filter((a) =>
         /\bview\b/i.test((a.textContent || "").trim())
@@ -965,7 +1084,9 @@ async function captureSectionSnapshot(tabId, frameId, sectionIndex) {
         views,
         selectorStats: {
           sectionNavCount: links.length,
-          viewLinkCount: viewLinks.length
+          viewLinkCount: viewLinks.length,
+          heading: headingText(container),
+          containerMatchedLabel: ready.matched
         }
       };
     },
@@ -992,7 +1113,14 @@ async function fetchViewHtml(tabId, frameId, url) {
             "#btnOkReadOnly",
             "#fileProgressDiv",
             "#documentFormHolder",
-            "#PortalToolsData"
+            "#PortalToolsData",
+            ".BtnRNPageComments",
+            ".BtnRNFieldComments",
+            "[class*='ReviewerNotes']",
+            "[class*='BtnRN']",
+            "[title^='Open reviewer notes']",
+            "[aria-label^='Open reviewer notes']",
+            "[role='button'][data-projectid][data-projecttype]"
           ];
           doc.querySelectorAll(removeSelectors.join(",")).forEach((node) => node.remove());
           doc.querySelectorAll("*").forEach((node) => {
@@ -1011,12 +1139,22 @@ async function fetchViewHtml(tabId, frameId, url) {
               return;
             }
             const tag = String(node.tagName || "").toUpperCase();
+            const text = (node.textContent || node.getAttribute("value") || "").trim();
+            const title = String(node.getAttribute("title") || "");
+            const aria = String(node.getAttribute("aria-label") || "");
+            const className = String(node.getAttribute("class") || "");
+            if (
+              /reviewer\s*notes/i.test(`${text} ${title} ${aria}`) ||
+              /\bBtnRN|ReviewerNotes|Icon-ReviewerNotes/i.test(className)
+            ) {
+              node.remove();
+              return;
+            }
             if (tag === "BUTTON" || tag === "INPUT") {
               const type = String(node.getAttribute("type") || "").toLowerCase();
-              const text = (node.textContent || node.getAttribute("value") || "").trim();
               if (
                 (type === "button" || type === "submit" || tag === "BUTTON") &&
-                /^(ok|close)$/i.test(text)
+                /^(ok|close|print|help|finish|save|submit|continue|back|exit)$/i.test(text)
               ) {
                 node.remove();
               }
@@ -1551,6 +1689,36 @@ async function writeDiagnostics(job) {
   );
 }
 
+function checkSmartFormCompleteness(job, sections) {
+  const expected = Array.isArray(sections) ? sections : [];
+  const capturedLabels = new Set(job.smartformSections.map((section) => section.label));
+  const missing = expected
+    .map((section, index) => ({ index: index + 1, label: section.label }))
+    .filter((section) => !capturedLabels.has(section.label));
+
+  if (missing.length) {
+    warnJob(
+      job,
+      `SmartForm captured ${job.smartformSections.length}/${expected.length} sections. Missing: ${missing
+        .map((section) => `${section.index} ${section.label}`)
+        .join("; ")}`
+    );
+  }
+
+  const headingCounts = new Map();
+  for (const report of job.diagnostics.smartform.sectionReports || []) {
+    const heading = report?.selectorStats?.heading || "";
+    if (!heading) continue;
+    headingCounts.set(heading, (headingCounts.get(heading) || 0) + 1);
+  }
+  const duplicateHeadings = Array.from(headingCounts.entries())
+    .filter(([, count]) => count > 1)
+    .map(([heading]) => heading);
+  if (duplicateHeadings.length) {
+    warnJob(job, `SmartForm captured duplicate section headings: ${duplicateHeadings.join("; ")}`);
+  }
+}
+
 async function runExport(tabId) {
   const job = createJob(tabId);
   let diagnosticsWritten = false;
@@ -1619,6 +1787,13 @@ async function runExport(tabId) {
           const err = snapshot?.error || `Section ${i + 1} capture failed.`;
           job.errors.push(err);
           job.diagnostics.errors.push(err);
+          job.diagnostics.smartform.sectionReports.push({
+            sectionNumber: i + 1,
+            label: sections[i]?.label || `Section ${i + 1}`,
+            status: "failed",
+            error: err,
+            selectorStats: snapshot?.selectorStats || {}
+          });
           warnJob(job, err);
           continue;
         }
@@ -1668,6 +1843,7 @@ async function runExport(tabId) {
         job.diagnostics.smartform.sectionReports.push({
           sectionNumber: i + 1,
           label: snapshot.label,
+          status: "captured",
           sectionDir: dir,
           segmentPath,
           partCountSaved: stitchedParts.length,
@@ -1681,9 +1857,18 @@ async function runExport(tabId) {
         const message = err?.message || String(err);
         job.errors.push(`Section ${i + 1} error: ${message}`);
         job.diagnostics.errors.push(`Section ${i + 1} error: ${message}`);
+        job.diagnostics.smartform.sectionReports.push({
+          sectionNumber: i + 1,
+          label: sections[i]?.label || `Section ${i + 1}`,
+          status: "error",
+          error: message,
+          selectorStats: {}
+        });
         warnJob(job, `Section ${i + 1} error: ${message}`);
       }
     }
+
+    checkSmartFormCompleteness(job, sections);
 
     await writeSmartFormIndex(job);
     logJob(job, "Wrote smartform/index.json");
