@@ -28,7 +28,6 @@
 
 ---
 
-
 - `~/Downloads/ETHOS/<STUDY_ID>/`
 
 The package is designed for downstream upload/analysis workflows and includes deterministic metadata and diagnostics.
@@ -109,7 +108,8 @@ The same validation model runs on both hosts.
 - CI: `.github/workflows/ci.yml`
 - Packaging: `.github/workflows/release-package.yml`
   - Runs on tag (`v*`) or manual dispatch
-  - Uploads zip from `dist/`
+  - Uploads zip from `dist/` as a workflow artifact
+  - Creates/updates a GitHub Release with the zip on version tags
 
 ### GitLab
 

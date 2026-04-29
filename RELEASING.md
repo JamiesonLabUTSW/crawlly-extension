@@ -41,8 +41,19 @@ In a clean browser profile:
 ## 5. Tag and publish
 
 - Create git tag: `v<version>`
-- Push tag to trigger packaging workflow
+- Push tag to trigger packaging workflow:
+  - `git push origin v<version>`
+- Confirm the GitHub Release was created and contains:
+  - `ethos-irb-exporter-v<version>.zip`
 - Upload vetted zip to distribution channel (Chrome Web Store / Edge Add-ons / enterprise process)
+
+The preferred release path is tag-driven. The web UI is still fine for emergency/manual uploads, but the tag pipeline keeps version validation, packaging, and GitHub release assets reproducible.
+
+Manual package-only run:
+
+- Open GitHub Actions > Release Package > Run workflow.
+- Leave `create_release` disabled to only produce an Actions artifact.
+- Enable `create_release` only when the checked-out manifest version is final and should create/update `v<version>`.
 
 ## 6. Post-release checks
 
