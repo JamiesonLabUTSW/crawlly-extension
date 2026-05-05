@@ -1,5 +1,9 @@
 # Release Notes
 
+## v0.2.4
+
+- Replaces existing downloaded document files on repeat exports instead of creating `(1)` duplicates.
+
 ## v0.2.3
 
 - Promotes the v3 icon artwork to the canonical installed-extension icon filenames.

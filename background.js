@@ -422,7 +422,7 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
   }
   if (!ext) ext = ".bin";
   const filename = `ETHOS/${job.studyId}/documents/${job.awaitingDoc.safeBase}${ext}`;
-  suggest({ filename, conflictAction: "uniquify" });
+  suggest({ filename, conflictAction: "overwrite" });
 });
 
 async function detectStudyContext(tabId) {
