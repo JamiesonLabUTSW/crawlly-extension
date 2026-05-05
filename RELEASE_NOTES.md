@@ -1,5 +1,10 @@
 # Release Notes
 
+## v0.2.3
+
+- Promotes the v3 icon artwork to the canonical installed-extension icon filenames.
+- Removes older, badge, and v3-suffixed duplicate icon assets from the package.
+
 ## v0.2.2
 
 - Adds installed-extension icons to `manifest.json` for Chrome and Edge.
