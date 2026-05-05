@@ -1,6 +1,6 @@
 {
   "name": "ethos-irb-exporter",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "description": "ETHOS IRB Exporter browser extension",
   "scripts": {

@@ -18,6 +18,7 @@ zip -r "$OUT_FILE" \
   popup.js \
   popup.css \
   README.md \
+  icons \
   -x "*.DS_Store"
 
 echo "created $OUT_FILE"

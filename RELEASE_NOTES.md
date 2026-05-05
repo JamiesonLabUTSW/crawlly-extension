@@ -1,5 +1,10 @@
 # Release Notes
 
+## v0.2.2
+
+- Adds installed-extension icons to `manifest.json` for Chrome and Edge.
+- Includes the `icons/` directory in the packaged web-store zip.
+
 ## v0.2.1
 
 - Adds `COMPLETED WITH WARNINGS` status when an export finishes with reviewable warnings.
