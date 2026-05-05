@@ -1,5 +1,16 @@
 # Release Notes
 
+## v0.2.1
+
+- Adds `COMPLETED WITH WARNINGS` status when an export finishes with reviewable warnings.
+- Keeps normal Documents top-frame fallback as a log message instead of a warning.
+- Waits for the Documents row count to stabilize before downloading.
+- Reopens the Documents tab once if no document rows are detected on first count.
+- Retries each failed document row once after restoring the Documents context.
+- Extends Documents download-menu wait time to reduce timing-related failures.
+- Adds final document completeness validation when fewer documents are captured than detected.
+- Adds document-count retry/stability diagnostics to `export_diagnostics.json`.
+
 ## v0.2.0
 
 - Adds SmartForm print-view capture for reviewer/edit credential contexts.

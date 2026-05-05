@@ -37,6 +37,15 @@ In a clean browser profile:
   - `export_diagnostics.json`
   - `smartform/index.json`
   - expected `smartform/*` and `documents/*`
+- Review terminal popup status:
+  - `COMPLETED` means no warnings were recorded.
+  - `COMPLETED WITH WARNINGS` means export finished, but `export_diagnostics.json` should be reviewed before upload/use.
+- Review document diagnostics:
+  - `documents.optionRowsDetected`
+  - `documents.countStable`
+  - `documents.countRetryUsed`
+  - `summary.documentCountCaptured`
+  - any document warnings or errors
 
 ## 5. Tag and publish
 
@@ -46,6 +55,9 @@ In a clean browser profile:
 - Confirm the GitHub Release was created and contains:
   - `ethos-irb-exporter-v<version>.zip`
 - Upload vetted zip to distribution channel (Chrome Web Store / Edge Add-ons / enterprise process)
+- For Chrome Web Store / Edge Add-ons uploads, use the local or release artifact:
+  - `dist/ethos-irb-exporter-v<version>.zip`
+- Confirm the store draft shows the same version as `manifest.json` before submitting for review.
 
 The preferred release path is tag-driven. The web UI is still fine for emergency/manual uploads, but the tag pipeline keeps version validation, packaging, and GitHub release assets reproducible.
 

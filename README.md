@@ -15,6 +15,7 @@
   - [Installation (unpacked)](#installation-unpacked)
   - [Runtime requirements](#runtime-requirements)
   - [Operational constraints (current release)](#operational-constraints-current-release)
+  - [Export status and diagnostics](#export-status-and-diagnostics)
   - [Local development](#local-development)
     - [Prerequisites](#prerequisites)
     - [Commands](#commands)
@@ -77,6 +78,19 @@ ETHOS/<STUDY_ID>/
 - Keep the ETHOS workspace tab open until export reaches `Completed` or `Failed`.
 - These are intentional constraints for reliable package routing in the current architecture.
 
+## Export status and diagnostics
+
+The popup reports one terminal job status per export:
+
+- `COMPLETED`: export finished without warnings.
+- `COMPLETED WITH WARNINGS`: export finished, but diagnostics contain warnings that should be reviewed.
+- `FAILED`: export stopped on a fatal error.
+- `CANCELLED`: user cancelled the running export.
+
+Warnings are reserved for conditions that may need review, such as incomplete SmartForm capture, zero document rows after retry, failed document rows, or ETHOS returning HTML instead of a downloaded document. Normal ETHOS layout differences, such as Documents rendering in the top frame instead of a nested frame, are logged but do not mark the export with warnings.
+
+Document export uses a conservative recovery path: the extension waits for the Documents row count to stabilize, reopens Documents once if no rows are found, waits longer for download menus, and retries a failed document row once. `export_diagnostics.json` records document count stability, whether count retry was used, per-document download metadata, warnings, and errors.
+
 ## Local development
 
 ### Prerequisites
@@ -136,4 +150,5 @@ For non-technical users, use controlled distribution through Chrome Web Store / 
 ## Operational notes
 
 - If a document is saved as `download.html`, ETHOS likely returned an HTML page instead of the binary document for that item.
+- If the final status is `COMPLETED WITH WARNINGS`, inspect `export_diagnostics.json` first. The package may still be usable, but at least one SmartForm or document condition needs review.
 - `export_diagnostics.json` should be used as first-line evidence for support/debugging.
