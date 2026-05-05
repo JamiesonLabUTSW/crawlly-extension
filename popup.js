@@ -65,7 +65,10 @@ function renderJob(job) {
     return;
   }
 
-  stepEl.textContent = `${job.status.toUpperCase()} - ${job.step}`;
+  const statusLabel = String(job.status || "")
+    .replace(/_/g, " ")
+    .toUpperCase();
+  stepEl.textContent = `${statusLabel} - ${job.step}`;
   const docs = `${job.documentIndex}/${job.documentTotal}`;
   const sections = `${job.sectionIndex}/${job.sectionTotal}`;
   progressEl.textContent = `Study: ${job.studyId || "-"} | Sections: ${sections} | Documents: ${docs} | W:${job.warningCount || 0} E:${job.errorCount || 0}`;

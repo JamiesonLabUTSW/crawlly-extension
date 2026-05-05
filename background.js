@@ -189,6 +189,12 @@ function failJob(job, err) {
 }
 
 function completeJob(job) {
+  if (job.warnings.length > 0) {
+    job.status = "completed_with_warnings";
+    job.step = "Completed with warnings";
+    logJob(job, "Export completed with warnings.");
+    return;
+  }
   job.status = "completed";
   job.step = "Completed";
   logJob(job, "Export completed.");
@@ -1598,6 +1604,27 @@ async function getDocumentsCount(tabId, frameId = null) {
   );
 }
 
+async function waitForDocumentsCountStable(tabId, frameId = null, timeoutMs = 10000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastInfo = { count: 0 };
+  let lastCount = -1;
+
+  while (Date.now() < deadline) {
+    const info = (await getDocumentsCount(tabId, frameId)) || { count: 0 };
+    const count = info.count || 0;
+    lastInfo = info;
+
+    if (count > 0 && count === lastCount) {
+      return { ...info, stable: true };
+    }
+
+    lastCount = count;
+    await sleep(1000);
+  }
+
+  return { ...lastInfo, stable: false };
+}
+
 async function getDocumentRowInfo(tabId, index, frameId = null) {
   return runScript(
     tabId,
@@ -1812,7 +1839,7 @@ async function openDocumentOptions(tabId, index, frameId = null) {
       btn.scrollIntoView({ block: "center", behavior: "instant" });
       btn.click();
       let menuItems = collectVisibleDownloadItems();
-      const deadline = Date.now() + 2000;
+      const deadline = Date.now() + 5000;
       while (!menuItems.length && Date.now() < deadline) {
         await new Promise((resolve) => setTimeout(resolve, 100));
         menuItems = collectVisibleDownloadItems();
@@ -1948,7 +1975,7 @@ async function restoreDocumentsContext(job, tabId) {
   await sleep(1200);
   const docsFrameId = await findDocumentsFrame(tabId);
   if (docsFrameId == null) {
-    warnJob(job, "Could not identify a frame containing Document Options; using top frame.");
+    logJob(job, "No separate documents frame found; using top frame.");
   } else {
     logJob(job, `Using documents frame ${docsFrameId}.`);
   }
@@ -2115,6 +2142,15 @@ function checkSmartFormCompleteness(job, sections) {
     .map(([heading]) => heading);
   if (duplicateHeadings.length) {
     warnJob(job, `SmartForm captured duplicate section headings: ${duplicateHeadings.join("; ")}`);
+  }
+}
+
+function checkDocumentCompleteness(job) {
+  if (job.documentTotal > 0 && job.documents.length < job.documentTotal) {
+    warnJob(
+      job,
+      `Documents captured ${job.documents.length}/${job.documentTotal}. Check export_diagnostics.json for failed document rows.`
+    );
   }
 }
 
@@ -2304,14 +2340,23 @@ async function runExport(tabId) {
     if (job.cancelRequested) return cancelAndPersist();
     job.step = "Downloading study documents";
     let docsFrameId = await restoreDocumentsContext(job, tabId);
-    const docsInfo = await getDocumentsCount(tabId, docsFrameId);
+    let docsInfo = await waitForDocumentsCountStable(tabId, docsFrameId, 10000);
+    let documentCountRetryUsed = false;
+    if ((docsInfo?.count || 0) === 0) {
+      logJob(job, "No document rows detected on first count; reopening Documents tab.");
+      documentCountRetryUsed = true;
+      docsFrameId = await restoreDocumentsContext(job, tabId);
+      docsInfo = await waitForDocumentsCountStable(tabId, docsFrameId, 10000);
+    }
     job.documentTotal = docsInfo?.count || 0;
     job.diagnostics.documents.optionRowsDetected = job.documentTotal;
+    job.diagnostics.documents.countStable = Boolean(docsInfo?.stable);
+    job.diagnostics.documents.countRetryUsed = documentCountRetryUsed;
     logJob(job, `Found ${job.documentTotal} document option rows.`);
     if (job.documentTotal === 0) {
       warnJob(
         job,
-        "No document rows detected. Check ETHOS permissions/tab state or selector drift."
+        "No document rows detected after reopening Documents tab. Check ETHOS permissions/tab state or selector drift."
       );
     }
 
@@ -2319,194 +2364,212 @@ async function runExport(tabId) {
     for (let i = 0; i < job.documentTotal; i++) {
       if (job.cancelRequested) return cancelAndPersist();
       job.documentIndex = i + 1;
-      try {
-        const prep = await getDocumentRowInfo(tabId, i, docsFrameId);
-        if (!prep?.ok) {
-          const err = prep?.error || `Failed to inspect document row #${i + 1}`;
-          job.errors.push(err);
-          job.diagnostics.errors.push(err);
-          warnJob(job, err);
-          continue;
-        }
+      let documentCaptured = false;
+      for (let attempt = 1; attempt <= 2 && !documentCaptured; attempt++) {
+        try {
+          const prep = await getDocumentRowInfo(tabId, i, docsFrameId);
+          if (!prep?.ok) {
+            const err = prep?.error || `Failed to inspect document row #${i + 1}`;
+            throw new Error(err);
+          }
 
-        const safeBase = sanitizeFilename(prep.docName || `document_${i + 1}`);
-        const extHint = sanitizeExtension(prep.extHint || "");
-        job.awaitingDoc = { displayName: prep.docName || `Document ${i + 1}`, safeBase, extHint };
-        let completeItem = null;
-        let primaryMethod = "";
-        let fallbackUsed = false;
-        let fallbackReason = "";
-        let clickedRowLinkLabel = "";
-        let clickedMenuLabel = "";
-        let menuPrep = null;
-        let menuAction = null;
-        let linkOutcome = null;
+          const safeBase = sanitizeFilename(prep.docName || `document_${i + 1}`);
+          const extHint = sanitizeExtension(prep.extHint || "");
+          job.awaitingDoc = { displayName: prep.docName || `Document ${i + 1}`, safeBase, extHint };
+          let completeItem = null;
+          let primaryMethod = "";
+          let fallbackUsed = false;
+          let fallbackReason = "";
+          let clickedRowLinkLabel = "";
+          let clickedMenuLabel = "";
+          let menuPrep = null;
+          let menuAction = null;
+          let linkOutcome = null;
 
-        if (tryRowLinkFirst) {
-          const linkSnapshot = await getWindowTabSnapshot(tabId);
-          const linkClick = await clickDocumentRowLink(tabId, i, prep.docName, docsFrameId);
-          if (!linkClick?.ok) {
-            fallbackUsed = true;
-            fallbackReason = "no_row_link";
-            warnJob(
-              job,
-              `Row-link click unavailable for "${prep.docName}" (${linkClick?.error || "no row link"}); using menu fallback.`
-            );
-          } else {
-            clickedRowLinkLabel = linkClick.clickedLabel || "";
-            try {
-              const createdFromLink = await waitForCreatedDownload(job, 15000);
-              completeItem = await waitForDownloadComplete(createdFromLink.id, 120000);
-              primaryMethod = "row_link";
-            } catch (_) {
+          if (tryRowLinkFirst) {
+            const linkSnapshot = await getWindowTabSnapshot(tabId);
+            const linkClick = await clickDocumentRowLink(tabId, i, prep.docName, docsFrameId);
+            if (!linkClick?.ok) {
               fallbackUsed = true;
-              linkOutcome = await detectLinkClickOutcome(tabId, linkSnapshot);
-              if ((linkOutcome?.openedNewTabIds || []).length > 0) {
-                fallbackReason = "opened_new_tab";
-              } else if (linkOutcome?.urlChanged) {
-                fallbackReason = "opened_preview";
-              } else {
-                fallbackReason = "no_created_event";
-              }
+              fallbackReason = "no_row_link";
               warnJob(
                 job,
-                `Row-link download did not start for "${prep.docName}" (${fallbackReason}); using menu fallback.`
+                `Row-link click unavailable for "${prep.docName}" (${linkClick?.error || "no row link"}); using menu fallback.`
               );
-              if ((linkOutcome?.openedNewTabIds || []).length > 0) {
-                try {
-                  await chrome.tabs.remove(linkOutcome.openedNewTabIds);
-                } catch (closeErr) {
-                  warnJob(
-                    job,
-                    `Could not close row-link opened tab(s): ${closeErr?.message || String(closeErr)}`
-                  );
+            } else {
+              clickedRowLinkLabel = linkClick.clickedLabel || "";
+              try {
+                const createdFromLink = await waitForCreatedDownload(job, 15000);
+                completeItem = await waitForDownloadComplete(createdFromLink.id, 120000);
+                primaryMethod = "row_link";
+              } catch (_) {
+                fallbackUsed = true;
+                linkOutcome = await detectLinkClickOutcome(tabId, linkSnapshot);
+                if ((linkOutcome?.openedNewTabIds || []).length > 0) {
+                  fallbackReason = "opened_new_tab";
+                } else if (linkOutcome?.urlChanged) {
+                  fallbackReason = "opened_preview";
+                } else {
+                  fallbackReason = "no_created_event";
                 }
-              }
-              if (linkOutcome?.urlChanged || (linkOutcome?.openedNewTabIds || []).length > 0) {
-                docsFrameId = await restoreDocumentsContext(job, tabId);
+                warnJob(
+                  job,
+                  `Row-link download did not start for "${prep.docName}" (${fallbackReason}); using menu fallback.`
+                );
+                if ((linkOutcome?.openedNewTabIds || []).length > 0) {
+                  try {
+                    await chrome.tabs.remove(linkOutcome.openedNewTabIds);
+                  } catch (closeErr) {
+                    warnJob(
+                      job,
+                      `Could not close row-link opened tab(s): ${closeErr?.message || String(closeErr)}`
+                    );
+                  }
+                }
+                if (linkOutcome?.urlChanged || (linkOutcome?.openedNewTabIds || []).length > 0) {
+                  docsFrameId = await restoreDocumentsContext(job, tabId);
+                }
               }
             }
           }
-        }
 
-        if (!completeItem) {
-          menuPrep = await openDocumentOptions(tabId, i, docsFrameId);
-          if (!menuPrep?.ok) {
-            const err = menuPrep?.error || `Failed to prepare menu fallback for doc #${i + 1}`;
-            job.errors.push(err);
-            job.diagnostics.errors.push(err);
-            warnJob(job, err);
-            job.awaitingDoc = null;
-            continue;
-          }
-          menuAction = await getDownloadMenuAction(tabId, true, docsFrameId);
-          if (!menuAction?.ok) {
-            const err =
-              menuAction?.error || `Failed to resolve fallback download action for doc #${i + 1}`;
-            job.errors.push(err);
-            job.diagnostics.errors.push(err);
-            warnJob(job, err);
-            job.awaitingDoc = null;
-            continue;
-          }
-          const downloadCreatedPromise = waitForCreatedDownload(job, 40000);
-          const clickResult = await clickDownloadMenuItem(tabId, true, docsFrameId);
-          if (!clickResult?.ok) {
-            const err = clickResult?.error || `Failed to click download for doc #${i + 1}`;
-            job.errors.push(err);
-            job.diagnostics.errors.push(err);
-            warnJob(job, err);
-            job.awaitingDoc = null;
-            continue;
-          }
-          clickedMenuLabel = clickResult?.clickedLabel || menuAction?.clickedLabel || "";
-          const created = await downloadCreatedPromise;
-          completeItem = await waitForDownloadComplete(created.id, 120000);
-          primaryMethod = "menu_click";
-        }
-
-        if (!completeItem) {
-          throw new Error(`Document ${i + 1} completed with no download item.`);
-        }
-
-        const relativeDetected = makeRelativeFromAbsolute(completeItem.filename, job.studyId);
-        const savedPath =
-          relativeDetected || `documents/${safeBase}${extractExtension(completeItem.filename)}`;
-        if (!relativeDetected) {
-          warnJob(
-            job,
-            `Downloaded file path did not include ETHOS/${job.studyId} prefix: ${completeItem.filename}`
-          );
-        }
-        const finalExt = sanitizeExtension(extractExtension(completeItem.filename));
-        const mime = String(completeItem.mime || "").toLowerCase();
-        const lookedLikeHtml =
-          finalExt === ".html" || finalExt === ".htm" || mime.includes("text/html");
-        if (lookedLikeHtml) {
-          warnJob(
-            job,
-            `Document "${prep.docName}" downloaded as HTML (${completeItem.filename}). This usually indicates a failed file export in ETHOS.`
-          );
-        }
-        job.documents.push({
-          displayName: prep.docName || `Document ${i + 1}`,
-          savedPath
-        });
-        job.diagnostics.documents.items.push({
-          index: i + 1,
-          displayName: prep.docName || `Document ${i + 1}`,
-          extHint,
-          primaryMethod,
-          fallbackUsed,
-          fallbackReason,
-          clickedRowLinkLabel,
-          clickedMenuLabel,
-          menuHadDownloadCopy: Boolean(menuPrep?.hasCopy),
-          menuHadPlainDownload: Boolean(menuPrep?.hasPlain),
-          resolvedMenuUrlHost: menuAction?.resolvedUrl
-            ? (() => {
-                try {
-                  return new URL(menuAction.resolvedUrl).host;
-                } catch (_) {
-                  return "";
-                }
-              })()
-            : "",
-          savedPath,
-          downloadId: completeItem.id || null,
-          createdTabId: typeof completeItem.tabId === "number" ? completeItem.tabId : null,
-          finalUrlHost: (() => {
+          if (!completeItem) {
+            menuPrep = await openDocumentOptions(tabId, i, docsFrameId);
+            if (!menuPrep?.ok) {
+              const err = menuPrep?.error || `Failed to prepare menu fallback for doc #${i + 1}`;
+              job.awaitingDoc = null;
+              throw new Error(err);
+            }
+            menuAction = await getDownloadMenuAction(tabId, true, docsFrameId);
+            if (!menuAction?.ok) {
+              const err =
+                menuAction?.error || `Failed to resolve fallback download action for doc #${i + 1}`;
+              job.awaitingDoc = null;
+              throw new Error(err);
+            }
+            const downloadCreatedPromise = waitForCreatedDownload(job, 40000);
+            let clickResult = null;
             try {
-              return new URL(completeItem.finalUrl || completeItem.url || "").host;
-            } catch (_) {
-              return "";
+              clickResult = await clickDownloadMenuItem(tabId, true, docsFrameId);
+            } catch (clickErr) {
+              downloadCreatedPromise.catch(() => {});
+              throw clickErr;
             }
-          })(),
-          linkOutcome: {
-            urlChanged: Boolean(linkOutcome?.urlChanged),
-            openedNewTabIds: linkOutcome?.openedNewTabIds || [],
-            currentUrl: linkOutcome?.currentUrl || ""
-          },
-          finalFilename: completeItem.filename,
-          mime,
-          lookedLikeHtml
-        });
-        job.awaitingDoc = null;
-        logJob(
-          job,
-          `Downloaded ${job.documentIndex}/${job.documentTotal}: ${prep.docName} (${primaryMethod})`
-        );
-        await sleep(200);
-      } catch (err) {
-        const message = err?.message || String(err);
-        job.errors.push(`Document ${i + 1} error: ${message}`);
-        job.diagnostics.errors.push(`Document ${i + 1} error: ${message}`);
-        warnJob(job, `Document ${i + 1} error: ${message}`);
-        job.awaitingDoc = null;
+            if (!clickResult?.ok) {
+              const err = clickResult?.error || `Failed to click download for doc #${i + 1}`;
+              downloadCreatedPromise.catch(() => {});
+              job.awaitingDoc = null;
+              throw new Error(err);
+            }
+            clickedMenuLabel = clickResult?.clickedLabel || menuAction?.clickedLabel || "";
+            const created = await downloadCreatedPromise;
+            completeItem = await waitForDownloadComplete(created.id, 120000);
+            primaryMethod = "menu_click";
+          }
+
+          if (!completeItem) {
+            throw new Error(`Document ${i + 1} completed with no download item.`);
+          }
+
+          const relativeDetected = makeRelativeFromAbsolute(completeItem.filename, job.studyId);
+          const savedPath =
+            relativeDetected || `documents/${safeBase}${extractExtension(completeItem.filename)}`;
+          if (!relativeDetected) {
+            warnJob(
+              job,
+              `Downloaded file path did not include ETHOS/${job.studyId} prefix: ${completeItem.filename}`
+            );
+          }
+          const finalExt = sanitizeExtension(extractExtension(completeItem.filename));
+          const mime = String(completeItem.mime || "").toLowerCase();
+          const lookedLikeHtml =
+            finalExt === ".html" || finalExt === ".htm" || mime.includes("text/html");
+          if (lookedLikeHtml) {
+            warnJob(
+              job,
+              `Document "${prep.docName}" downloaded as HTML (${completeItem.filename}). This usually indicates a failed file export in ETHOS.`
+            );
+          }
+          job.documents.push({
+            displayName: prep.docName || `Document ${i + 1}`,
+            savedPath
+          });
+          job.diagnostics.documents.items.push({
+            index: i + 1,
+            displayName: prep.docName || `Document ${i + 1}`,
+            extHint,
+            primaryMethod,
+            fallbackUsed,
+            fallbackReason,
+            clickedRowLinkLabel,
+            clickedMenuLabel,
+            menuHadDownloadCopy: Boolean(menuPrep?.hasCopy),
+            menuHadPlainDownload: Boolean(menuPrep?.hasPlain),
+            resolvedMenuUrlHost: menuAction?.resolvedUrl
+              ? (() => {
+                  try {
+                    return new URL(menuAction.resolvedUrl).host;
+                  } catch (_) {
+                    return "";
+                  }
+                })()
+              : "",
+            savedPath,
+            downloadId: completeItem.id || null,
+            createdTabId: typeof completeItem.tabId === "number" ? completeItem.tabId : null,
+            finalUrlHost: (() => {
+              try {
+                return new URL(completeItem.finalUrl || completeItem.url || "").host;
+              } catch (_) {
+                return "";
+              }
+            })(),
+            linkOutcome: {
+              urlChanged: Boolean(linkOutcome?.urlChanged),
+              openedNewTabIds: linkOutcome?.openedNewTabIds || [],
+              currentUrl: linkOutcome?.currentUrl || ""
+            },
+            finalFilename: completeItem.filename,
+            mime,
+            lookedLikeHtml
+          });
+          job.awaitingDoc = null;
+          logJob(
+            job,
+            `Downloaded ${job.documentIndex}/${job.documentTotal}: ${prep.docName} (${primaryMethod})`
+          );
+          documentCaptured = true;
+          await sleep(200);
+        } catch (err) {
+          const message = err?.message || String(err);
+          job.awaitingDoc = null;
+          if (attempt === 1) {
+            logJob(
+              job,
+              `Document ${i + 1} error: ${message}; reopening Documents tab and retrying once.`
+            );
+            try {
+              docsFrameId = await restoreDocumentsContext(job, tabId);
+            } catch (restoreErr) {
+              const restoreMessage = restoreErr?.message || String(restoreErr);
+              const combined = `Document ${i + 1} error: ${message}; retry setup failed: ${restoreMessage}`;
+              job.errors.push(combined);
+              job.diagnostics.errors.push(combined);
+              warnJob(job, combined);
+              break;
+            }
+            await sleep(500);
+            continue;
+          }
+          job.errors.push(`Document ${i + 1} error: ${message}`);
+          job.diagnostics.errors.push(`Document ${i + 1} error: ${message}`);
+          warnJob(job, `Document ${i + 1} error: ${message}`);
+        }
       }
     }
 
     if (job.cancelRequested) return cancelAndPersist();
+    checkDocumentCompleteness(job);
     job.step = "Writing manifest";
     await writeManifest(job);
     logJob(job, "Wrote manifest.json");
