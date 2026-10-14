@@ -91,6 +91,8 @@ Warnings are reserved for conditions that may need review, such as incomplete Sm
 
 Document export uses a conservative recovery path: the extension waits for the Documents row count to stabilize, reopens Documents once if no rows are found, waits longer for download menus, and retries a failed document row once. `export_diagnostics.json` records document count stability, whether count retry was used, per-document download metadata, warnings, and errors.
 
+SmartForm diagnostics include an independent navigation inventory, missing print pages, missing final pages, and a completeness result (`complete`, `incomplete`, or `unverified`). A missing navigation inventory produces a warning; print progress alone does not prove completeness. Missing printed pages are retried through read-only navigation.
+
 ## Local development
 
 ### Prerequisites
@@ -101,6 +103,8 @@ Document export uses a conservative recovery path: the extension waits for the D
 
 - Install dependencies:
   - `npm ci`
+- Run synthetic SmartForm regression tests:
+  - `npm test`
 - Run quality/security gate:
   - `npm run ci`
 - Build extension zip artifact:

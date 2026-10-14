@@ -10,6 +10,13 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function smartFormPageKey(label) {
+  return String(label || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
 function sanitizeFilename(name) {
   return (
     (name || "")
@@ -551,7 +558,9 @@ async function listSmartFormSections(tabId, frameId) {
           node.getAttribute("title") ||
           node.textContent ||
           `Section ${index + 1}`
-        ).trim();
+        )
+          .replace(/\s+/g, " ")
+          .trim();
         return { index, label };
       });
     },
@@ -585,17 +594,17 @@ async function resolveSmartFormPrintProjectUrl(tabId) {
   });
 }
 
-async function openSmartFormPrintProject(tabId) {
+async function openSmartFormPrintProject(tabId, expectedSections = []) {
   const printInfo = await resolveSmartFormPrintProjectUrl(tabId);
   if (!printInfo?.ok) return printInfo;
   await chrome.tabs.update(tabId, { url: printInfo.url });
   await waitForTabComplete(tabId, 40000);
-  const ready = await waitForPrintedSmartFormReady(tabId, 120000);
+  const ready = await waitForPrintedSmartFormReady(tabId, 120000, expectedSections);
   if (!ready.ok) return ready;
   return { ok: true, method: "print-project", url: printInfo.url, ...ready };
 }
 
-async function waitForPrintedSmartFormReady(tabId, timeoutMs = 60000) {
+async function waitForPrintedSmartFormReady(tabId, timeoutMs = 60000, expectedSections = []) {
   const deadline = Date.now() + timeoutMs;
   let firstRenderableAt = 0;
   let stableSince = 0;
@@ -603,48 +612,12 @@ async function waitForPrintedSmartFormReady(tabId, timeoutMs = 60000) {
   let lastState = null;
 
   while (Date.now() < deadline) {
-    const state = await runScript(tabId, () => {
-      const normalizeText = (value) =>
-        String(value || "")
-          .replace(/\u00a0/g, " ")
-          .replace(/\s+/g, " ")
-          .trim();
-      const sectionBlocks = Array.from(document.querySelectorAll("div#_webr_EntityView")).filter(
-        (node) => !node.parentElement?.closest("div#_webr_EntityView")
-      );
-      const headings = sectionBlocks
-        .map((node) => {
-          const headingNodes = Array.from(
-            node.querySelectorAll("h1, h2, h3, [role='heading'], strong, b, legend")
-          );
-          return (
-            headingNodes
-              .map((heading) => normalizeText(heading.textContent || ""))
-              .find((heading) => /^\d+\.\d+(?!\.)\b/.test(heading)) || ""
-          );
-        })
-        .filter(Boolean);
-      const progressElement = document.querySelector("#printProgress, #printProgressBar");
-      const progressText = normalizeText(progressElement?.textContent || "");
-      const bodyText = document.body?.innerText || "";
-      return {
-        headingCount: headings.length,
-        headings,
-        hasProgressElement: Boolean(progressElement),
-        progressText,
-        readyState: document.readyState,
-        sectionCount: sectionBlocks.length,
-        viewLinkCount: Array.from(document.querySelectorAll("a")).filter((anchor) =>
-          /^view$/i.test(normalizeText(anchor.textContent || ""))
-        ).length,
-        hasStudyId: /\bSTU(?:[-\s]?\d){5,}\b/i.test(bodyText)
-      };
-    });
+    const state = await capturePrintedSmartForm(tabId, expectedSections, true);
     lastState = state;
 
     if (state?.sectionCount > 0 && state?.hasStudyId) {
       if (!firstRenderableAt) firstRenderableAt = Date.now();
-      const signature = `${state.sectionCount}|${state.headingCount}|${state.viewLinkCount}|${state.headings.join(
+      const signature = `${state.contentSignature}|${state.sectionCount}|${state.headingCount}|${state.viewLinkCount}|${state.headings.join(
         "|"
       )}`;
       if (signature === lastSignature) {
@@ -661,6 +634,7 @@ async function waitForPrintedSmartFormReady(tabId, timeoutMs = 60000) {
 
       if (
         state.headingCount > 0 &&
+        state.missingLabels.length === 0 &&
         state.readyState === "complete" &&
         renderMs >= 4000 &&
         stableMs >= 2500 &&
@@ -672,6 +646,7 @@ async function waitForPrintedSmartFormReady(tabId, timeoutMs = 60000) {
           headingCount: state.headingCount,
           viewLinkCount: state.viewLinkCount,
           progressText: state.progressText,
+          missingLabels: state.missingLabels,
           progressIncomplete: !progressComplete && progressUnavailable
         };
       }
@@ -686,6 +661,7 @@ async function waitForPrintedSmartFormReady(tabId, timeoutMs = 60000) {
       headingCount: lastState.headingCount,
       viewLinkCount: lastState.viewLinkCount,
       progressText: lastState.progressText,
+      missingLabels: lastState.missingLabels,
       progressIncomplete: true
     };
   }
@@ -698,175 +674,246 @@ async function waitForPrintedSmartFormReady(tabId, timeoutMs = 60000) {
   };
 }
 
-async function capturePrintedSmartForm(tabId) {
-  return runScript(tabId, () => {
-    function normalizeText(value) {
-      return String(value || "")
-        .replace(/\u00a0/g, " ")
-        .replace(/\s+/g, " ")
-        .trim();
-    }
-
-    function sectionPrefix(value) {
-      const match = String(value || "").match(/^\s*(\d+\.\d+)(?!\.)\b/);
-      return match ? match[1] : "";
-    }
-
-    function headingText(root) {
-      const headingNodes = Array.from(
-        root.querySelectorAll("h1, h2, h3, [role='heading'], strong, b, legend")
-      );
-      const heading =
-        headingNodes.find((node) => /^\s*\d+\.\d+(?!\.)\b/.test(node.textContent || "")) ||
-        headingNodes[0];
-      return normalizeText(heading?.textContent || "");
-    }
-
-    function serializePrintSection(rootElement, title) {
-      const clone = rootElement.cloneNode(true);
-      const removeSelectors = [
-        "script",
-        "style",
-        "noscript",
-        "input[type='hidden']",
-        ".ALDForPrint",
-        ".Hidden",
-        "#fileProgressDiv",
-        "#documentFormHolder",
-        "#PortalToolsData"
-      ];
-      clone.querySelectorAll(removeSelectors.join(",")).forEach((node) => node.remove());
-      clone.querySelectorAll("table").forEach((table) => {
-        const headerText = normalizeText(
-          Array.from(table.querySelectorAll("th, .DisplayHead, .ViewSetTableHeader"))
-            .map((cell) => cell.textContent || "")
-            .join(" ")
-        );
-        if (
-          /\b(accountdisabled|cachedpermissionlists|encryptedpassword|passwordsalt|passwordmustchange|projectworkingset)\b/i.test(
-            headerText
-          )
-        ) {
-          table.remove();
-        }
-      });
-      clone.querySelectorAll("*").forEach((node) => {
-        const style = String(node.getAttribute("style") || "")
-          .toLowerCase()
-          .replace(/\s+/g, "");
-        if (
-          style.includes("display:none") ||
-          style.includes("visibility:hidden") ||
-          node.getAttribute("aria-hidden") === "true" ||
-          node.hasAttribute("hidden")
-        ) {
-          node.remove();
-        }
-      });
-      clone.querySelectorAll("a").forEach((anchor) => {
-        anchor.setAttribute("href", anchor.href || "#");
-        anchor.setAttribute("target", "_blank");
-        anchor.setAttribute("rel", "noopener noreferrer");
-      });
-
-      return [
-        "<!doctype html>",
-        "<html>",
-        "<head>",
-        "<meta charset='utf-8' />",
-        `<title>${String(title || "").replace(/</g, "&lt;")}</title>`,
-        "<style>body{margin:16px;font-family:Segoe UI,Tahoma,sans-serif;background:#fff;color:#111}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:4px;vertical-align:top}a{color:#004c7d}</style>",
-        "</head>",
-        "<body>",
-        clone.outerHTML,
-        "</body>",
-        "</html>"
-      ].join("");
-    }
-
-    function quotedArgs(value) {
-      return [...String(value || "").matchAll(/'([^']*)'/g)].map((match) => match[1]);
-    }
-
-    function resolveReadonlyViewUrl(anchor) {
-      const args = quotedArgs(anchor.getAttribute("onclick") || "");
-      if (args.length < 6 || !/showReadOnlyCustomDataForm/i.test(anchor.getAttribute("onclick")))
-        return null;
-
-      const [itemOID, entityview, rootEntity, rootViewId, cdtDerefPath, qualifiedAttributeName] = [
-        args[0],
-        args[1],
-        args[2],
-        args[3],
-        args[4],
-        args[5]
-      ];
-      const params = new URLSearchParams({
-        readonly: "1",
-        itemOID,
-        entityview,
-        rootEntity,
-        qualifiedAttributeName,
-        showReviewerNotes: "false",
-        isIframe: "false",
-        rootViewId,
-        cdtDerefPath
-      });
-      return `${location.origin}/ETHOS/sd/CommonAdministration/Choosers/Entity/CustomDataType/DataEntry/Form?${params.toString()}`;
-    }
-
-    const sectionBlocks = Array.from(document.querySelectorAll("div#_webr_EntityView")).filter(
-      (node) => {
-        if (node.parentElement?.closest("div#_webr_EntityView")) return false;
-        const heading = headingText(node);
-        const prefix = sectionPrefix(heading);
-        const text = normalizeText(node.textContent || "");
-        return Boolean(prefix && text.length > 20);
+async function capturePrintedSmartForm(tabId, expectedSections = [], inspectOnly = false) {
+  return runScript(
+    tabId,
+    (expected, inspect) => {
+      function normalizeText(value) {
+        return String(value || "")
+          .replace(/\u00a0/g, " ")
+          .replace(/\s+/g, " ")
+          .trim();
       }
-    );
 
-    const seenPrefixes = new Set();
-    const sections = [];
-    for (const node of sectionBlocks) {
-      const label = headingText(node);
-      const prefix = sectionPrefix(label);
-      if (!prefix || seenPrefixes.has(prefix)) continue;
-      seenPrefixes.add(prefix);
+      function sectionPrefix(value) {
+        const match = String(value || "").match(/^\s*(\d+\.\d+)(?!\.)\b/);
+        return match ? match[1] : "";
+      }
 
-      const viewLinks = Array.from(node.querySelectorAll("a")).filter(
-        (anchor) =>
-          /^view$/i.test(normalizeText(anchor.textContent || "")) && resolveReadonlyViewUrl(anchor)
+      const expectedLabels = new Set(
+        expected.map((section) => normalizeText(section.label).toLowerCase())
       );
-      const views = viewLinks.map((anchor, index) => ({
-        index: index + 1,
-        method: "print-readonly-url",
-        url: resolveReadonlyViewUrl(anchor),
-        html: "",
-        error: null
-      }));
+      function headingText(root) {
+        // Only headings owned by this entity view qualify, never headings in nested views.
+        const headingNodes = Array.from(
+          root.querySelectorAll("h1, h2, h3, [role='heading'], strong, b, legend")
+        ).filter((node) => node.closest("div#_webr_EntityView") === root);
+        const inventoryHeading = headingNodes.find((node) =>
+          expectedLabels.has(normalizeText(node.textContent).toLowerCase())
+        );
+        if (inventoryHeading) return normalizeText(inventoryHeading.textContent);
+        const firstHeading = headingNodes[0];
+        const label = normalizeText(firstHeading?.textContent);
+        // Without navigation evidence, retain numbered pages and the known named ETHOS page.
+        // Arbitrary bold text is not a page identity.
+        return sectionPrefix(label) || label === "Non-Regulated Research" ? label : "";
+      }
 
-      sections.push({
-        ok: true,
-        label,
-        html: serializePrintSection(node, label),
-        views,
-        selectorStats: {
-          source: "printProject",
-          heading: label,
-          viewLinkCount: views.length,
-          sectionNavCount: sectionBlocks.length,
-          containerMatchedLabel: true
+      function serializePrintSection(rootElement, title) {
+        const clone = rootElement.cloneNode(true);
+        const sourceControls = rootElement.querySelectorAll("input, textarea, select");
+        const cloneControls = clone.querySelectorAll("input, textarea, select");
+        sourceControls.forEach((source, index) => {
+          const target = cloneControls[index];
+          if (source.tagName === "TEXTAREA") target.textContent = source.value;
+          else if (source.tagName === "SELECT") {
+            Array.from(source.options).forEach((option, optionIndex) => {
+              target.options[optionIndex].toggleAttribute("selected", option.selected);
+            });
+            // A select with no selection otherwise defaults to its first option on reload.
+            if (source.selectedIndex < 0) {
+              const empty = document.createElement("option");
+              empty.textContent = "[Unanswered]";
+              empty.setAttribute("selected", "");
+              empty.setAttribute("data-export-unanswered", "true");
+              target.prepend(empty);
+            }
+          } else if (/^(radio|checkbox)$/i.test(source.type)) {
+            target.toggleAttribute("checked", source.checked);
+          } else target.setAttribute("value", source.value);
+        });
+        const removeSelectors = [
+          "script",
+          "style",
+          "noscript",
+          "input[type='hidden']",
+          ".ALDForPrint",
+          ".Hidden",
+          "#fileProgressDiv",
+          "#documentFormHolder",
+          "#PortalToolsData"
+        ];
+        clone.querySelectorAll(removeSelectors.join(",")).forEach((node) => node.remove());
+        clone.querySelectorAll("table").forEach((table) => {
+          const headerText = normalizeText(
+            Array.from(table.querySelectorAll("th, .DisplayHead, .ViewSetTableHeader"))
+              .map((cell) => cell.textContent || "")
+              .join(" ")
+          );
+          if (
+            /\b(accountdisabled|cachedpermissionlists|encryptedpassword|passwordsalt|passwordmustchange|projectworkingset)\b/i.test(
+              headerText
+            )
+          ) {
+            table.remove();
+          }
+        });
+        clone.querySelectorAll("*").forEach((node) => {
+          const style = String(node.getAttribute("style") || "")
+            .toLowerCase()
+            .replace(/\s+/g, "");
+          if (
+            style.includes("display:none") ||
+            style.includes("visibility:hidden") ||
+            node.getAttribute("aria-hidden") === "true" ||
+            node.hasAttribute("hidden")
+          ) {
+            node.remove();
+          }
+        });
+        clone.querySelectorAll("a").forEach((anchor) => {
+          anchor.setAttribute("href", anchor.href || "#");
+          anchor.setAttribute("target", "_blank");
+          anchor.setAttribute("rel", "noopener noreferrer");
+        });
+
+        return [
+          "<!doctype html>",
+          "<html>",
+          "<head>",
+          "<meta charset='utf-8' />",
+          `<title>${String(title || "").replace(/</g, "&lt;")}</title>`,
+          "<style>body{margin:16px;font-family:Segoe UI,Tahoma,sans-serif;background:#fff;color:#111}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:4px;vertical-align:top}a{color:#004c7d}</style>",
+          "</head>",
+          "<body>",
+          clone.outerHTML,
+          "</body>",
+          "</html>"
+        ].join("");
+      }
+
+      function quotedArgs(value) {
+        return [...String(value || "").matchAll(/'([^']*)'/g)].map((match) => match[1]);
+      }
+
+      function resolveReadonlyViewUrl(anchor) {
+        const args = quotedArgs(anchor.getAttribute("onclick") || "");
+        if (args.length < 6 || !/showReadOnlyCustomDataForm/i.test(anchor.getAttribute("onclick")))
+          return null;
+
+        const [itemOID, entityview, rootEntity, rootViewId, cdtDerefPath, qualifiedAttributeName] =
+          [args[0], args[1], args[2], args[3], args[4], args[5]];
+        const params = new URLSearchParams({
+          readonly: "1",
+          itemOID,
+          entityview,
+          rootEntity,
+          qualifiedAttributeName,
+          showReviewerNotes: "false",
+          isIframe: "false",
+          rootViewId,
+          cdtDerefPath
+        });
+        return `${location.origin}/ETHOS/sd/CommonAdministration/Choosers/Entity/CustomDataType/DataEntry/Form?${params.toString()}`;
+      }
+
+      const sectionBlocks = Array.from(document.querySelectorAll("div#_webr_EntityView")).filter(
+        (node) => {
+          if (node.parentElement?.closest("div#_webr_EntityView")) return false;
+          const heading = headingText(node);
+          const text = normalizeText(node.textContent || "");
+          return Boolean(heading && text.length > 20);
         }
-      });
-    }
+      );
 
-    return {
-      ok: sections.length > 0,
-      sectionCount: sections.length,
-      sections,
-      error: sections.length ? "" : "No printable SmartForm section blocks found."
-    };
-  });
+      const headings = sectionBlocks.map(headingText);
+      const capturedKeys = new Set(headings.map((label) => label.toLowerCase()));
+      const missingLabels = expected
+        .map((section) => normalizeText(section.label))
+        .filter((label) => !capturedKeys.has(label.toLowerCase()));
+      const progressElement = document.querySelector("#printProgress, #printProgressBar");
+      if (inspect) {
+        // Watch answer content as well as page counts; controls may populate after headings.
+        const content = sectionBlocks
+          .map(
+            (node) =>
+              node.textContent +
+              Array.from(node.querySelectorAll("input, textarea, select"))
+                .map((control) => `${control.value}:${control.checked}:${control.selectedIndex}`)
+                .join("|")
+          )
+          .join("|");
+        let contentSignature = 0;
+        for (let i = 0; i < content.length; i++)
+          contentSignature =
+            ((contentSignature << 5) - contentSignature + content.charCodeAt(i)) | 0;
+        return {
+          headings,
+          headingCount: headings.length,
+          sectionCount: sectionBlocks.length,
+          missingLabels,
+          contentSignature,
+          hasProgressElement: Boolean(progressElement),
+          progressText: normalizeText(progressElement?.textContent),
+          readyState: document.readyState,
+          hasStudyId: /\bSTU(?:[-\s]?\d){5,}\b/i.test(
+            document.body?.innerText || document.body?.textContent || ""
+          ),
+          viewLinkCount: sectionBlocks.reduce(
+            (count, node) =>
+              count +
+              Array.from(node.querySelectorAll("a")).filter((anchor) =>
+                /^view$/i.test(normalizeText(anchor.textContent))
+              ).length,
+            0
+          )
+        };
+      }
+      const seenPages = new Set();
+      const sections = [];
+      for (const node of sectionBlocks) {
+        const label = headingText(node);
+        const identity = `${sectionPrefix(label) ? "numbered" : "named"}:${label.toLowerCase()}`;
+        if (!label || seenPages.has(identity)) continue;
+        seenPages.add(identity);
+
+        const viewLinks = Array.from(node.querySelectorAll("a")).filter(
+          (anchor) =>
+            /^view$/i.test(normalizeText(anchor.textContent || "")) &&
+            resolveReadonlyViewUrl(anchor)
+        );
+        const views = viewLinks.map((anchor, index) => ({
+          index: index + 1,
+          method: "print-readonly-url",
+          url: resolveReadonlyViewUrl(anchor),
+          html: "",
+          error: null
+        }));
+
+        sections.push({
+          ok: true,
+          label,
+          html: serializePrintSection(node, label),
+          views,
+          selectorStats: {
+            source: "printProject",
+            heading: label,
+            viewLinkCount: views.length,
+            sectionNavCount: sectionBlocks.length,
+            containerMatchedLabel: true
+          }
+        });
+      }
+
+      return {
+        ok: sections.length > 0,
+        sectionCount: sections.length,
+        sections,
+        error: sections.length ? "" : "No printable SmartForm section blocks found."
+      };
+    },
+    [expectedSections, inspectOnly]
+  );
 }
 
 async function captureSectionSnapshot(tabId, frameId, sectionIndex) {
@@ -1001,14 +1048,14 @@ async function captureSectionSnapshot(tabId, frameId, sectionIndex) {
             dst.setAttribute("src", src.currentSrc);
           }
           if (dst.tagName === "TEXTAREA") {
-            dst.textContent = src.value || src.textContent || "";
+            dst.textContent = src.value;
           }
           if (dst.tagName === "INPUT") {
             const type = String(src.getAttribute("type") || "").toLowerCase();
             if (type === "checkbox" || type === "radio") {
               if (src.checked) dst.setAttribute("checked", "checked");
               else dst.removeAttribute("checked");
-            } else if (src.value) {
+            } else {
               dst.setAttribute("value", src.value);
             }
           }
@@ -1142,9 +1189,7 @@ async function captureSectionSnapshot(tabId, frameId, sectionIndex) {
         const headingNodes = Array.from(
           root.querySelectorAll("h1, h2, h3, [role='heading'], strong, b, legend")
         );
-        const heading =
-          headingNodes.find((node) => /^\s*\d+(?:\.\d+)*/.test(node.textContent || "")) ||
-          headingNodes[0];
+        const heading = headingNodes[0];
         return (heading?.textContent || "").trim();
       }
 
@@ -1160,7 +1205,7 @@ async function captureSectionSnapshot(tabId, frameId, sectionIndex) {
           const rootText = normalizeText(root?.textContent || "").slice(0, 500);
           return rootText.startsWith(`${expectedPrefix} `);
         }
-        return Boolean(normalizedHeading || normalizeText(root?.textContent || ""));
+        return false;
       }
 
       function resolveSectionContainer(link, label) {
@@ -1378,7 +1423,9 @@ async function captureSectionSnapshot(tabId, frameId, sectionIndex) {
         link.getAttribute("title") ||
         link.textContent ||
         `Section ${idx + 1}`
-      ).trim();
+      )
+        .replace(/\s+/g, " ")
+        .trim();
       link.scrollIntoView({ block: "center", behavior: "instant" });
       link.click();
       await sleepInner(250);
@@ -2117,11 +2164,24 @@ async function persistSmartFormSnapshot(job, tabId, frameId, sectionNumber, snap
 
 function checkSmartFormCompleteness(job, sections) {
   const expected = Array.isArray(sections) ? sections : [];
-  const capturedLabels = new Set(job.smartformSections.map((section) => section.label));
+  const capturedLabels = new Set(
+    job.smartformSections.map((section) => smartFormPageKey(section.label))
+  );
   const missing = expected
     .map((section, index) => ({ index: index + 1, label: section.label }))
-    .filter((section) => !capturedLabels.has(section.label));
+    .filter((section) => !capturedLabels.has(smartFormPageKey(section.label)));
 
+  job.diagnostics.smartform.missingSections = missing;
+  job.diagnostics.smartform.completeness = !expected.length
+    ? "unverified"
+    : missing.length
+      ? "incomplete"
+      : "complete";
+  if (!expected.length)
+    warnJob(
+      job,
+      "SmartForm completeness unverified: no independent navigation inventory available."
+    );
   if (missing.length) {
     warnJob(
       job,
@@ -2196,8 +2256,42 @@ async function runExport(tabId) {
     if (job.cancelRequested) return cancelAndPersist();
     let sections = [];
     let usedPrintProject = false;
+    let expectedSections = [];
+    try {
+      job.step = "Reading SmartForm page inventory";
+      const inventoryOpen = await openSmartFormReadOnly(tabId);
+      if (!inventoryOpen?.ok) throw new Error(inventoryOpen?.error || "Read-only view unavailable");
+      await waitForTabComplete(tabId, 40000);
+      const inventoryDeadline = Date.now() + 15000;
+      let previousInventory = "";
+      let inventoryStableSince = 0;
+      while (Date.now() < inventoryDeadline) {
+        const inventoryFrame = await findSmartFormFrame(tabId);
+        const inventory =
+          inventoryFrame == null ? [] : await listSmartFormSections(tabId, inventoryFrame);
+        const signature = JSON.stringify(inventory);
+        if (inventory?.length && signature === previousInventory) {
+          if (!inventoryStableSince) inventoryStableSince = Date.now();
+          if (Date.now() - inventoryStableSince >= 2000) {
+            expectedSections = inventory;
+            break;
+          }
+        } else inventoryStableSince = 0;
+        previousInventory = signature;
+        await sleep(500);
+      }
+      if (!expectedSections.length) throw new Error("Navigation inventory did not stabilize");
+    } catch (err) {
+      warnJob(job, `SmartForm completeness validation limited: ${err?.message || String(err)}`);
+    }
+    job.diagnostics.smartform.expectedSections = expectedSections;
+    job.diagnostics.smartform.inventorySource = expectedSections.length
+      ? "readOnlyNavigation"
+      : "unavailable";
+    await chrome.tabs.update(tabId, { url: job.workspaceUrl });
+    await waitForTabComplete(tabId, 40000);
     job.step = "Opening SmartForm print view";
-    const printOpenRes = await openSmartFormPrintProject(tabId);
+    const printOpenRes = await openSmartFormPrintProject(tabId, expectedSections);
     if (printOpenRes?.ok) {
       logJob(job, `SmartForm print view opened via ${printOpenRes.method}.`);
       job.diagnostics.smartform.printReadiness = {
@@ -2205,15 +2299,16 @@ async function runExport(tabId) {
         headingCount: printOpenRes.headingCount,
         viewLinkCount: printOpenRes.viewLinkCount,
         progressText: printOpenRes.progressText || "",
-        progressIncomplete: Boolean(printOpenRes.progressIncomplete)
+        progressIncomplete: Boolean(printOpenRes.progressIncomplete),
+        missingLabels: printOpenRes.missingLabels || []
       };
       if (printOpenRes.progressIncomplete) {
         warnJob(
           job,
-          "SmartForm print progress did not report 100%; captured after the section list stabilized."
+          "SmartForm print readiness was not fully verified before timeout; attempting capture and recovery from the stabilized page list."
         );
       }
-      const printCapture = await capturePrintedSmartForm(tabId);
+      const printCapture = await capturePrintedSmartForm(tabId, expectedSections);
       if (
         printCapture?.ok &&
         Array.isArray(printCapture.sections) &&
@@ -2262,71 +2357,117 @@ async function runExport(tabId) {
       warnJob(job, `SmartForm print view unavailable: ${printOpenRes?.error || "unknown error"}`);
     }
 
-    if (!usedPrintProject) {
-      if (job.cancelRequested) return cancelAndPersist();
-      job.step = "Opening SmartForm read-only view";
-      await chrome.tabs.update(tabId, { url: job.workspaceUrl });
-      await waitForTabComplete(tabId, 40000);
-      await sleep(800);
-      const openRes = await openSmartFormReadOnly(tabId);
-      if (!openRes?.ok) throw new Error(openRes?.error || "Failed to open SmartForm.");
-      await waitForTabComplete(tabId, 40000);
-      await sleep(1200);
-      logJob(job, `SmartForm opened via ${openRes.method}.`);
-
-      if (job.cancelRequested) return cancelAndPersist();
-      job.step = "Capturing SmartForm sections";
-      const frameId = await findSmartFormFrame(tabId);
-      if (frameId == null) throw new Error("Could not locate SmartForm frame.");
-      job.diagnostics.smartform.frameId = frameId;
-      job.diagnostics.smartform.captureSource = "sectionNavigation";
-
-      sections = (await listSmartFormSections(tabId, frameId)) || [];
-      job.sectionTotal = sections.length;
-      job.diagnostics.smartform.sectionCountDetected = sections.length;
-      if (!sections.length) throw new Error("No SmartForm sections found.");
-      logJob(job, `Found ${sections.length} sections.`);
-
-      for (let i = 0; i < sections.length; i++) {
+    const missingPrintPages = expectedSections.filter(
+      (section) =>
+        !job.smartformSections.some(
+          (captured) => smartFormPageKey(captured.label) === smartFormPageKey(section.label)
+        )
+    );
+    job.diagnostics.smartform.missingPrintPages = missingPrintPages;
+    if (missingPrintPages.length && usedPrintProject) {
+      logJob(
+        job,
+        `Recovering missing printed pages through read-only navigation: ${missingPrintPages.map((section) => section.label).join("; ")}`
+      );
+    }
+    if (!usedPrintProject || missingPrintPages.length) {
+      try {
         if (job.cancelRequested) return cancelAndPersist();
-        job.sectionIndex = i + 1;
-        try {
-          const snapshot = await captureSectionSnapshot(tabId, frameId, i);
-          if (!snapshot?.ok) {
-            const err = snapshot?.error || `Section ${i + 1} capture failed.`;
-            job.errors.push(err);
-            job.diagnostics.errors.push(err);
+        job.step = "Opening SmartForm read-only view";
+        await chrome.tabs.update(tabId, { url: job.workspaceUrl });
+        await waitForTabComplete(tabId, 40000);
+        await sleep(800);
+        const openRes = await openSmartFormReadOnly(tabId);
+        if (!openRes?.ok) throw new Error(openRes?.error || "Failed to open SmartForm.");
+        await waitForTabComplete(tabId, 40000);
+        await sleep(1200);
+        logJob(job, `SmartForm opened via ${openRes.method}.`);
+
+        if (job.cancelRequested) return cancelAndPersist();
+        job.step = "Capturing SmartForm sections";
+        const frameId = await findSmartFormFrame(tabId);
+        if (frameId == null) throw new Error("Could not locate SmartForm frame.");
+        job.diagnostics.smartform.frameId = frameId;
+        job.diagnostics.smartform.captureSource = usedPrintProject
+          ? "printProject+sectionNavigation"
+          : "sectionNavigation";
+
+        sections = (await listSmartFormSections(tabId, frameId)) || [];
+        if (!expectedSections.length && sections.length) {
+          expectedSections = sections;
+          job.diagnostics.smartform.expectedSections = sections;
+          job.diagnostics.smartform.inventorySource = "readOnlyNavigation";
+        }
+        job.sectionTotal = sections.length;
+        job.diagnostics.smartform.sectionCountDetected = sections.length;
+        if (!sections.length) throw new Error("No SmartForm sections found.");
+        logJob(job, `Found ${sections.length} sections.`);
+
+        for (let i = 0; i < sections.length; i++) {
+          if (
+            job.smartformSections.some(
+              (captured) => smartFormPageKey(captured.label) === smartFormPageKey(sections[i].label)
+            )
+          )
+            continue;
+          if (job.cancelRequested) return cancelAndPersist();
+          job.sectionIndex = i + 1;
+          try {
+            const snapshot = await captureSectionSnapshot(tabId, frameId, i);
+            if (!snapshot?.ok) {
+              const err = snapshot?.error || `Section ${i + 1} capture failed.`;
+              job.errors.push(err);
+              job.diagnostics.errors.push(err);
+              job.diagnostics.smartform.sectionReports.push({
+                sectionNumber: i + 1,
+                label: sections[i]?.label || `Section ${i + 1}`,
+                status: "failed",
+                error: err,
+                selectorStats: snapshot?.selectorStats || {}
+              });
+              warnJob(job, err);
+              continue;
+            }
+
+            await persistSmartFormSnapshot(job, tabId, frameId, i + 1, snapshot);
+            logJob(job, `Captured section ${i + 1}/${sections.length}: ${snapshot.label}`);
+            await sleep(200);
+          } catch (err) {
+            const message = err?.message || String(err);
+            job.errors.push(`Section ${i + 1} error: ${message}`);
+            job.diagnostics.errors.push(`Section ${i + 1} error: ${message}`);
             job.diagnostics.smartform.sectionReports.push({
               sectionNumber: i + 1,
               label: sections[i]?.label || `Section ${i + 1}`,
-              status: "failed",
-              error: err,
-              selectorStats: snapshot?.selectorStats || {}
+              status: "error",
+              error: message,
+              selectorStats: {}
             });
-            warnJob(job, err);
-            continue;
+            warnJob(job, `Section ${i + 1} error: ${message}`);
           }
-
-          await persistSmartFormSnapshot(job, tabId, frameId, i + 1, snapshot);
-          logJob(job, `Captured section ${i + 1}/${sections.length}: ${snapshot.label}`);
-          await sleep(200);
-        } catch (err) {
-          const message = err?.message || String(err);
-          job.errors.push(`Section ${i + 1} error: ${message}`);
-          job.diagnostics.errors.push(`Section ${i + 1} error: ${message}`);
-          job.diagnostics.smartform.sectionReports.push({
-            sectionNumber: i + 1,
-            label: sections[i]?.label || `Section ${i + 1}`,
-            status: "error",
-            error: message,
-            selectorStats: {}
-          });
-          warnJob(job, `Section ${i + 1} error: ${message}`);
         }
+      } catch (err) {
+        if (!usedPrintProject) throw err;
+        warnJob(job, `SmartForm navigation recovery failed: ${err?.message || String(err)}`);
       }
     }
 
-    checkSmartFormCompleteness(job, sections);
+    if (expectedSections.length) {
+      const pageOrder = new Map(
+        expectedSections.map((section, index) => [smartFormPageKey(section.label), index])
+      );
+      job.smartformSections.sort(
+        (a, b) =>
+          (pageOrder.get(smartFormPageKey(a.label)) ?? Infinity) -
+          (pageOrder.get(smartFormPageKey(b.label)) ?? Infinity)
+      );
+      for (const report of job.diagnostics.smartform.sectionReports) {
+        const index = pageOrder.get(smartFormPageKey(report.label));
+        if (index !== undefined) report.sectionNumber = index + 1;
+      }
+      job.diagnostics.smartform.sectionReports.sort((a, b) => a.sectionNumber - b.sectionNumber);
+    }
+    checkSmartFormCompleteness(job, expectedSections);
 
     await writeSmartFormIndex(job);
     logJob(job, "Wrote smartform/index.json");
