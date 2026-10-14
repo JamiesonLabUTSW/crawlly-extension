@@ -1,6 +1,6 @@
 # Release Notes
 
-## v0.2.5 (candidate — browser verification pending)
+## v0.2.5
 
 - Includes unnumbered SmartForm pages such as Non-Regulated Research with their original headings.
 - Reads an independent navigation inventory, reports missing pages, and attempts read-only navigation recovery.
@@ -8,6 +8,7 @@
 - Preserves live selected controls and text values in print exports.
 - Adds eleven synthetic DOM and export-flow regression tests to the CI gate.
 - Keeps the existing export package layout and extension permissions.
+- Verified a live Chrome export against its navigation inventory: six pages, selected NRR responses, twelve nested views, and three PDF documents; no warnings or errors.
 
 ## v0.2.4
 
