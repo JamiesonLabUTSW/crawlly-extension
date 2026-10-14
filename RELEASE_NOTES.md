@@ -1,5 +1,14 @@
 # Release Notes
 
+## v0.2.5 (candidate — browser verification pending)
+
+- Includes unnumbered SmartForm pages such as Non-Regulated Research with their original headings.
+- Reads an independent navigation inventory, reports missing pages, and attempts read-only navigation recovery.
+- Waits for page content and selected answers to stabilize, including named pages.
+- Preserves live selected controls and text values in print exports.
+- Adds eleven synthetic DOM and export-flow regression tests to the CI gate.
+- Keeps the existing export package layout and extension permissions.
+
 ## v0.2.4
 
 - Replaces existing downloaded document files on repeat exports instead of creating `(1)` duplicates.
